@@ -321,7 +321,10 @@ with aba_principal:
                 xml_resultado = processar_xml_tiss(xml_up, dfs_atuais)
                 
                 st.success("✅ O XML está pronto e o Hash calculado com formato Windows!")
-                
+                st.subheader("📋 XML Corrigido Pronto para Cópia")
+                st.info("Clique no botão de copiar no canto superior direito do quadro abaixo, cole no Validador TISS e gere a Hash correta.")
+
+                st.code(xml_resultado, language='xml')
                 st.download_button(
                     label="📥 Baixar XML Corrigido para Postagem",
                     data=xml_resultado,

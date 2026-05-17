@@ -20,6 +20,13 @@ def ans_tag(tag_name):
 def tag_limpa(element):
     return element.tag.split('}')[-1] if '}' in element.tag else element.tag
 
+def limpar_numero(valor):
+    """Remove o .0 que o Pandas adiciona em colunas numéricas"""
+    v = str(valor).strip()
+    if v.endswith('.0'):
+        return v[:-2]
+    return v
+
 # ==========================================
 # PERSISTÊNCIA DE DADOS (GOOGLE SHEETS / LOCAL)
 # ==========================================
@@ -97,14 +104,14 @@ def reordenar_e_ajustar_via_tecnica(proc_elem, via_acao, tec_acao):
     
     for tag in sequencia_tiss:
         if tag == 'viaAcesso':
-            if via_acao and str(via_acao).strip().upper() != 'EXCLUIR' and str(via_acao).strip() != 'nan':
+            if via_acao and via_acao.upper() != 'EXCLUIR' and via_acao.upper() != 'NAN':
                 el = ET.Element(ans_tag('viaAcesso'))
-                el.text = str(via_acao).strip()
+                el.text = via_acao
                 proc_elem.append(el)
         elif tag == 'tecnicaUtilizada':
-            if tec_acao and str(tec_acao).strip().upper() != 'EXCLUIR' and str(tec_acao).strip() != 'nan':
+            if tec_acao and tec_acao.upper() != 'EXCLUIR' and tec_acao.upper() != 'NAN':
                 el = ET.Element(ans_tag('tecnicaUtilizada'))
-                el.text = str(tec_acao).strip()
+                el.text = tec_acao
                 proc_elem.append(el)
         else:
             if tag in children_dict:
@@ -117,11 +124,12 @@ def processar_xml_tiss(arquivo_xml, dfs):
     tree = ET.parse(arquivo_xml)
     root = tree.getroot()
     
+    # Dicionários higienizados removendo o ".0" e filtrando valores nulos
     dict_medicos = {str(r['Nome do Médico']).strip().upper(): r for _, r in dfs['medicos'].iterrows()}
-    dict_procs = {str(r['Código do Procedimento']).strip(): r for _, r in dfs['procedimentos'].iterrows()}
-    set_conveniados = set(dfs['conveniados']['Nome do Médico Conveniado'].str.strip().str.upper())
-    set_blindagem = set(dfs['blindagem']['Código Prestador Protegido'].astype(str).str.strip())
-    dict_itens = dict(zip(dfs['itens']['Código Incorreto'].astype(str).str.strip(), dfs['itens']['Código Correto'].astype(str).str.strip()))
+    dict_procs = {limpar_numero(r['Código do Procedimento']): r for _, r in dfs['procedimentos'].iterrows()}
+    set_conveniados = set(str(x).strip().upper() for x in dfs['conveniados']['Nome do Médico Conveniado'] if str(x).strip().upper() != 'NAN')
+    set_blindagem = set(limpar_numero(x) for x in dfs['blindagem']['Código Prestador Protegido'] if limpar_numero(x).upper() != 'NAN')
+    dict_itens = {limpar_numero(k): limpar_numero(v) for k, v in zip(dfs['itens']['Código Incorreto'], dfs['itens']['Código Correto']) if limpar_numero(k).upper() != 'NAN'}
 
     for guia in root.findall('.//ans:guiaResumoInternacao', NS):
         carteira_elem = guia.find('.//ans:dadosBeneficiario/ans:numeroCarteira', NS)
@@ -150,8 +158,8 @@ def processar_xml_tiss(arquivo_xml, dfs):
                     regra_p = dict_procs[cod_proc]
                     reordenar_e_ajustar_via_tecnica(
                         proc_exec, 
-                        regra_p.get('Via de Acesso (1, 2 ou EXCLUIR)'), 
-                        regra_p.get('Técnica (1, 2 ou EXCLUIR)')
+                        limpar_numero(regra_p.get('Via de Acesso (1, 2 ou EXCLUIR)')), 
+                        limpar_numero(regra_p.get('Técnica (1, 2 ou EXCLUIR)'))
                     )
 
                 equipes = proc_exec.findall('ans:identEquipe', NS)
@@ -171,18 +179,22 @@ def processar_xml_tiss(arquivo_xml, dfs):
 
                     if nome_prof in dict_medicos:
                         regra_m = dict_medicos[nome_prof]
-                        if cbo_elem is not None and str(regra_m['CBO Correto']).strip() != 'nan':
-                            cbo_elem.text = str(regra_m['CBO Correto']).strip()
+                        cbo_novo = limpar_numero(regra_m['CBO Correto'])
+                        
+                        if cbo_elem is not None and cbo_novo.upper() != 'NAN' and cbo_novo != '':
+                            cbo_elem.text = cbo_novo
                         
                         if str(regra_m['Substituir por Cód. Operadora']).strip().upper() in ['SIM', 'S', 'TRUE'] and cod_prof_container is not None:
                             cod_prof_container.clear()
                             nova_tag = ET.SubElement(cod_prof_container, ans_tag('codigoPrestadorNaOperadora'))
-                            nova_tag.text = str(regra_m['Código na Operadora']).strip()
+                            nova_tag.text = limpar_numero(regra_m['Código na Operadora'])
 
                     if cod_proc in dict_procs and grau_elem is not None:
                         regra_p = dict_procs[cod_proc]
-                        if str(regra_p['Grau Part Obrigatório']).strip() != 'nan' and str(regra_p['Grau Part Obrigatório']).strip() != "":
-                            grau_elem.text = str(regra_p['Grau Part Obrigatório']).strip()
+                        grau_novo = limpar_numero(regra_p['Grau Part Obrigatório'])
+                        if grau_novo.upper() != 'NAN' and grau_novo != "":
+                            # Garante que o grau tenha 2 dígitos (ex: 1 -> 01)
+                            grau_elem.text = grau_novo.zfill(2)
 
                     if is_uberlandia and (cod_proc.startswith('1') or cod_proc.startswith('3')):
                         cod_prest_elem = ident_eq.find('.//ans:codigoPrestadorNaOperadora', NS)
@@ -233,25 +245,17 @@ def processar_xml_tiss(arquivo_xml, dfs):
             break
 
     if hash_node is not None:
-        # 1. Esvazia a tag hash
         hash_node.text = ""
-
-        # 2. Gera a estrutura do ficheiro em memória (norma exige codificação ISO-8859-1)
         temp_buffer = io.BytesIO()
         tree.write(temp_buffer, encoding='iso-8859-1', xml_declaration=True)
         xml_bytes = temp_buffer.getvalue()
 
-        # O validador TISS costuma ser estrito com as aspas na declaração inicial do ficheiro
         if xml_bytes.startswith(b"<?xml version='1.0' encoding='iso-8859-1'?>"):
             xml_bytes = xml_bytes.replace(b"<?xml version='1.0' encoding='iso-8859-1'?>", b'<?xml version="1.0" encoding="ISO-8859-1"?>')
 
-        # 3. Calcula o MD5 de toda a estrutura gerada
         novo_hash = hashlib.md5(xml_bytes).hexdigest()
-        
-        # 4. Preenche a tag com a nova assinatura validada
         hash_node.text = novo_hash
 
-    # Gera o ficheiro final com o hash correto para descarregar
     xml_buffer = io.BytesIO()
     tree.write(xml_buffer, encoding='iso-8859-1', xml_declaration=True)
     final_xml = xml_buffer.getvalue()

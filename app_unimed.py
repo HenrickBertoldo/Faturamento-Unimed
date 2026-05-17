@@ -13,6 +13,8 @@ st.set_page_config(page_title="Faturamento TISS Cloud - Unimed", layout="wide", 
 # ==========================================
 NS = {'ans': 'http://www.ans.gov.br/padroes/tiss/schemas'}
 ET.register_namespace('ans', 'http://www.ans.gov.br/padroes/tiss/schemas')
+# Forçar o registo da tag xsi para evitar que o Python a altere
+ET.register_namespace('xsi', 'http://www.w3.org/2001/XMLSchema-instance')
 
 def ans_tag(tag_name):
     return f"{{{NS['ans']}}}{tag_name}"
@@ -21,14 +23,17 @@ def tag_limpa(element):
     return element.tag.split('}')[-1] if '}' in element.tag else element.tag
 
 def limpar_numero(valor):
-    """Remove o .0 que o Pandas adiciona em colunas numéricas"""
     v = str(valor).strip()
+    if v.lower() == 'nan' or v.lower() == 'none' or v == '<na>' or v == '':
+        return ''
+    if v.endswith('.00'):
+        return v[:-3]
     if v.endswith('.0'):
         return v[:-2]
     return v
 
 # ==========================================
-# PERSISTÊNCIA DE DADOS (GOOGLE SHEETS / LOCAL)
+# PERSISTÊNCIA DE DADOS (GOOGLE SHEETS)
 # ==========================================
 tabelas_padrao = {
     'medicos': pd.DataFrame(columns=['Nome do Médico', 'CBO Correto', 'Substituir por Cód. Operadora', 'Código na Operadora']),
@@ -65,15 +70,15 @@ def salvar_no_sheets():
         st.error(f"Erro ao salvar na nuvem: {e}")
 
 # ==========================================
-# MOTOR DE CORREÇÃO DO XML (AS 8 REGRAS)
+# MOTOR DE CORREÇÃO DO XML 
 # ==========================================
 def calcular_tempo_oxigenio(hora_ini_str, qtd_executada, tipo_unidade):
     try:
         t_ini = datetime.strptime(hora_ini_str.strip(), "%H:%M:%S")
         qtd = float(qtd_executada.strip())
-        if tipo_unidade == '60034335':  # Por Hora
+        if tipo_unidade == '60034335':
             t_fim = t_ini + timedelta(hours=qtd)
-        elif tipo_unidade == '60034343':  # Por Minuto
+        elif tipo_unidade == '60034343':
             t_fim = t_ini + timedelta(minutes=qtd)
         else:
             return hora_ini_str
@@ -104,12 +109,12 @@ def reordenar_e_ajustar_via_tecnica(proc_elem, via_acao, tec_acao):
     
     for tag in sequencia_tiss:
         if tag == 'viaAcesso':
-            if via_acao and via_acao.upper() != 'EXCLUIR' and via_acao.upper() != 'NAN':
+            if via_acao and via_acao.upper() != 'EXCLUIR' and via_acao != '':
                 el = ET.Element(ans_tag('viaAcesso'))
                 el.text = via_acao
                 proc_elem.append(el)
         elif tag == 'tecnicaUtilizada':
-            if tec_acao and tec_acao.upper() != 'EXCLUIR' and tec_acao.upper() != 'NAN':
+            if tec_acao and tec_acao.upper() != 'EXCLUIR' and tec_acao != '':
                 el = ET.Element(ans_tag('tecnicaUtilizada'))
                 el.text = tec_acao
                 proc_elem.append(el)
@@ -124,12 +129,11 @@ def processar_xml_tiss(arquivo_xml, dfs):
     tree = ET.parse(arquivo_xml)
     root = tree.getroot()
     
-    # Dicionários higienizados removendo o ".0" e filtrando valores nulos
     dict_medicos = {str(r['Nome do Médico']).strip().upper(): r for _, r in dfs['medicos'].iterrows()}
     dict_procs = {limpar_numero(r['Código do Procedimento']): r for _, r in dfs['procedimentos'].iterrows()}
-    set_conveniados = set(str(x).strip().upper() for x in dfs['conveniados']['Nome do Médico Conveniado'] if str(x).strip().upper() != 'NAN')
-    set_blindagem = set(limpar_numero(x) for x in dfs['blindagem']['Código Prestador Protegido'] if limpar_numero(x).upper() != 'NAN')
-    dict_itens = {limpar_numero(k): limpar_numero(v) for k, v in zip(dfs['itens']['Código Incorreto'], dfs['itens']['Código Correto']) if limpar_numero(k).upper() != 'NAN'}
+    set_conveniados = set(str(x).strip().upper() for x in dfs['conveniados']['Nome do Médico Conveniado'] if pd.notna(x))
+    set_blindagem = set(limpar_numero(x) for x in dfs['blindagem']['Código Prestador Protegido'] if pd.notna(x))
+    dict_itens = {limpar_numero(k): limpar_numero(v) for k, v in zip(dfs['itens']['Código Incorreto'], dfs['itens']['Código Correto']) if pd.notna(k)}
 
     for guia in root.findall('.//ans:guiaResumoInternacao', NS):
         carteira_elem = guia.find('.//ans:dadosBeneficiario/ans:numeroCarteira', NS)
@@ -181,7 +185,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
                         regra_m = dict_medicos[nome_prof]
                         cbo_novo = limpar_numero(regra_m['CBO Correto'])
                         
-                        if cbo_elem is not None and cbo_novo.upper() != 'NAN' and cbo_novo != '':
+                        if cbo_elem is not None and cbo_novo != '':
                             cbo_elem.text = cbo_novo
                         
                         if str(regra_m['Substituir por Cód. Operadora']).strip().upper() in ['SIM', 'S', 'TRUE'] and cod_prof_container is not None:
@@ -192,8 +196,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
                     if cod_proc in dict_procs and grau_elem is not None:
                         regra_p = dict_procs[cod_proc]
                         grau_novo = limpar_numero(regra_p['Grau Part Obrigatório'])
-                        if grau_novo.upper() != 'NAN' and grau_novo != "":
-                            # Garante que o grau tenha 2 dígitos (ex: 1 -> 01)
+                        if grau_novo != "":
                             grau_elem.text = grau_novo.zfill(2)
 
                     if is_uberlandia and (cod_proc.startswith('1') or cod_proc.startswith('3')):
@@ -236,44 +239,48 @@ def processar_xml_tiss(arquivo_xml, dfs):
                             h_fim.text = calcular_tempo_oxigenio(h_ini.text, qtd_ex.text, cod_item)
 
     # ==========================================
-    # CÁLCULO ESTRUTURAL DO HASH TISS (ISO-8859-1)
+    # CÁLCULO ESTRUTURAL DO HASH TISS (A SOLUÇÃO DEFINITIVA)
     # ==========================================
     hash_node = None
     for elem in root.iter():
         if tag_limpa(elem) == 'hash':
             hash_node = elem
+            hash_node.text = "" # Garante que a tag fique estritamente vazia para o cálculo
             break
 
+    temp_buffer = io.BytesIO()
+    # short_empty_elements=False obriga o Python a escrever <ans:hash></ans:hash> ao invés do problemático <ans:hash />
+    tree.write(temp_buffer, encoding='ISO-8859-1', xml_declaration=True, short_empty_elements=False)
+    xml_bytes = temp_buffer.getvalue()
+
+    # Ajuste milimétrico da declaração XML para não falhar na Validação Unimed
+    if b"<?xml version='1.0' encoding='ISO-8859-1'?>" in xml_bytes:
+        xml_bytes = xml_bytes.replace(b"<?xml version='1.0' encoding='ISO-8859-1'?>", b'<?xml version="1.0" encoding="ISO-8859-1"?>')
+    elif b"<?xml version='1.0' encoding='iso-8859-1'?>" in xml_bytes:
+        xml_bytes = xml_bytes.replace(b"<?xml version='1.0' encoding='iso-8859-1'?>", b'<?xml version="1.0" encoding="ISO-8859-1"?>')
+
+    # Travar as quebras de linha estritamente em CRLF (Windows Padrão)
+    xml_bytes = xml_bytes.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
+
+    # Como OBRIGAMOS o short_empty_elements=False, a tag <ans:hash></ans:hash> já está correta no xml_bytes
+    md5_hash = hashlib.md5(xml_bytes).hexdigest()
+
+    # Injetar o Hash final
     if hash_node is not None:
-        hash_node.text = ""
-        temp_buffer = io.BytesIO()
-        tree.write(temp_buffer, encoding='iso-8859-1', xml_declaration=True)
-        xml_bytes = temp_buffer.getvalue()
-
-        if xml_bytes.startswith(b"<?xml version='1.0' encoding='iso-8859-1'?>"):
-            xml_bytes = xml_bytes.replace(b"<?xml version='1.0' encoding='iso-8859-1'?>", b'<?xml version="1.0" encoding="ISO-8859-1"?>')
-
-        novo_hash = hashlib.md5(xml_bytes).hexdigest()
-        hash_node.text = novo_hash
-
-    xml_buffer = io.BytesIO()
-    tree.write(xml_buffer, encoding='iso-8859-1', xml_declaration=True)
-    final_xml = xml_buffer.getvalue()
-
-    if final_xml.startswith(b"<?xml version='1.0' encoding='iso-8859-1'?>"):
-        final_xml = final_xml.replace(b"<?xml version='1.0' encoding='iso-8859-1'?>", b'<?xml version="1.0" encoding="ISO-8859-1"?>')
+        final_xml = xml_bytes.replace(b'<ans:hash></ans:hash>', f'<ans:hash>{md5_hash}</ans:hash>'.encode('ISO-8859-1'))
+    else:
+        final_xml = xml_bytes
 
     return final_xml
 
 # ==========================================
-# INTERFACE GRÁFICA (STREAMLIT APP)
+# INTERFACE GRÁFICA
 # ==========================================
 st.title("🛠️ Sistema Integrado Cloud TISS - Unimed Uberlândia")
 st.markdown("Configure as regras operacionais abaixo. Os seus dados ficam salvos dinamicamente na nuvem do aplicativo.")
 
 with st.sidebar:
     st.header("☁️ Conexão em Nuvem")
-    st.info("Sincronize as suas tabelas de regras diretamente com o seu Google Sheets.")
     
     if st.button("📥 Baixar Regras da Nuvem", type="primary", use_container_width=True):
         carregar_do_sheets()
@@ -309,7 +316,6 @@ aba_principal, aba_m, aba_p, aba_c, aba_b, aba_i = st.tabs([
 
 with aba_principal:
     st.header("Processamento de Lotes TISS")
-    st.markdown("Faça o upload do ficheiro XML gerado pelo hospital para aplicar de forma combinada todas as 8 regras configuradas.")
     
     xml_up = st.file_uploader("Selecione o ficheiro XML Hospitalar", type=['xml'])
     if xml_up:
@@ -318,38 +324,30 @@ with aba_principal:
                 dfs_atuais = {k: st.session_state[f'tab_{k}'] for k in tabelas_padrao.keys()}
                 xml_resultado = processar_xml_tiss(xml_up, dfs_atuais)
                 
-                st.success("✅ Todas as inconsistências e regras contratuais foram corrigidas com sucesso!")
+                st.success("✅ O XML está pronto e o Hash está calculado com precisão absoluta!")
+                
+                # A MÁGICA DO OCTET-STREAM: Impede que o browser corrompa o \r\n
                 st.download_button(
                     label="📥 Baixar XML Corrigido para Postagem",
                     data=xml_resultado,
                     file_name=f"CORRIGIDO_{xml_up.name}",
-                    mime="application/xml",
+                    mime="application/octet-stream", 
                     use_container_width=True
                 )
             except Exception as e:
-                st.error(f"Falha crítica no processamento estrutural do XML: {e}")
+                st.error(f"Falha crítica no processamento: {e}")
 
 with aba_m:
-    st.subheader("Configurações Clínicas e de Identificação")
-    st.caption("Regra 1 e 2: Altera a tag de identificação do médico (Troca de CPF por Código do Prestador) e insere o CBO correto.")
     st.session_state['tab_medicos'] = st.data_editor(st.session_state['tab_medicos'], num_rows="dynamic", use_container_width=True)
 
 with aba_p:
-    st.subheader("Parâmetros por Procedimento")
-    st.caption("Regra 3 e 8: Determina o Grau de Participação obrigatório ou gerencia as tags de Via de Acesso e Técnica (digite 'EXCLUIR' para eliminá-las).")
     st.session_state['tab_procedimentos'] = st.data_editor(st.session_state['tab_procedimentos'], num_rows="dynamic", use_container_width=True)
 
 with aba_c:
-    st.subheader("Lista de Médicos Conveniados")
-    st.caption("Regra 6: Caso a carteira comece com 0014, remove o médico. Se estiver sozinho no procedimento (Iniciais 1 ou 3), remove o bloco do procedimento inteiro.")
     st.session_state['tab_conveniados'] = st.data_editor(st.session_state['tab_conveniados'], num_rows="dynamic", use_container_width=True)
 
 with aba_b:
-    st.subheader("Blindagem de Clínicas e Prestadores Terceirizados")
-    st.caption("Regra 7: Insira o código da operadora (ex: 220163) de grupos que nunca devem ser removidos pela regra de conveniados.")
     st.session_state['tab_blindagem'] = st.data_editor(st.session_state['tab_blindagem'], num_rows="dynamic", use_container_width=True)
 
 with aba_i:
-    st.subheader("Tabela de Equivalência de Itens (De-Para)")
-    st.caption("Regra 5: Substitui automaticamente códigos incorretos de procedimentos, materiais ou medicamentos gerados incorretamente pelo hospital pelos códigos de contrato.")
     st.session_state['tab_itens'] = st.data_editor(st.session_state['tab_itens'], num_rows="dynamic", use_container_width=True)

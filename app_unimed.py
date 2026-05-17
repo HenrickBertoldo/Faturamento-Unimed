@@ -23,7 +23,7 @@ def tag_limpa(element):
 
 def limpar_numero(valor):
     v = str(valor).strip()
-    if v.lower() == 'nan' or v.lower() == 'none' or v == '<na>' or v == '':
+    if v.lower() in ['nan', 'none', '<na>', '']:
         return ''
     if v.endswith('.00'):
         return v[:-3]
@@ -39,7 +39,9 @@ tabelas_padrao = {
     'procedimentos': pd.DataFrame(columns=['Código do Procedimento', 'Grau Part Obrigatório', 'Via de Acesso (1, 2 ou EXCLUIR)', 'Técnica (1, 2 ou EXCLUIR)']),
     'conveniados': pd.DataFrame(columns=['Nome do Médico Conveniado']),
     'blindagem': pd.DataFrame(columns=['Código Prestador Protegido']),
-    'itens': pd.DataFrame(columns=['Código Incorreto', 'Código Correto'])
+    'itens': pd.DataFrame(columns=['Código Incorreto', 'Código Correto']),
+    'unidades': pd.DataFrame(columns=['Código do Item', 'Unidade de Medida Correta']),
+    'anvisa': pd.DataFrame(columns=['Código do Item', 'Registro ANVISA', 'Ref. Fabricante'])
 }
 
 for chave, df_padrao in tabelas_padrao.items():
@@ -124,6 +126,41 @@ def reordenar_e_ajustar_via_tecnica(proc_elem, via_acao, tec_acao):
     for eq in equipes:
         proc_elem.append(eq)
 
+def reordenar_servico_executado(servicos_node, nova_anvisa=None, nova_ref=None):
+    """Garante a ordenação rígida exigida pelo Schema TISS para materiais e medicamentos"""
+    valores = {}
+    for c in list(servicos_node):
+        valores[tag_limpa(c)] = c
+    
+    servicos_node.clear()
+    
+    ordem_tiss = [
+        'dataExecucao', 'horaInicial', 'horaFinal', 'codigoTabela', 'codigoProcedimento',
+        'quantidadeExecutada', 'unidadeMedida', 'reducaoAcrescimo', 'valorUnitario', 'valorTotal',
+        'descricaoProcedimento', 'registroANVISA', 'codigoRefFabricante'
+    ]
+    
+    for tag in ordem_tiss:
+        if tag == 'registroANVISA' and nova_anvisa:
+            el = ET.Element(ans_tag('registroANVISA'))
+            el.text = nova_anvisa
+            servicos_node.append(el)
+        elif tag == 'codigoRefFabricante' and nova_ref:
+            el = ET.Element(ans_tag('codigoRefFabricante'))
+            el.text = nova_ref
+            servicos_node.append(el)
+        elif tag in valores:
+            # Caso a tag já existisse mas estivesse vazia, prioriza o valor novo mapeado
+            if tag == 'registroANVISA' and (valores[tag].text is None or valores[tag].text.strip() == '') and nova_anvisa:
+                valores[tag].text = nova_anvisa
+            if tag == 'codigoRefFabricante' and (valores[tag].text is None or valores[tag].text.strip() == '') and nova_ref:
+                valores[tag].text = nova_ref
+            servicos_node.append(valores[tag])
+        elif tag == 'registroANVISA' and not nova_anvisa and 'registroANVISA' in valores:
+            servicos_node.append(valores['registroANVISA'])
+        elif tag == 'codigoRefFabricante' and not nova_ref and 'codigoRefFabricante' in valores:
+            servicos_node.append(valores['codigoRefFabricante'])
+
 def processar_xml_tiss(arquivo_xml, dfs):
     tree = ET.parse(arquivo_xml)
     root = tree.getroot()
@@ -133,6 +170,8 @@ def processar_xml_tiss(arquivo_xml, dfs):
     set_conveniados = set(str(x).strip().upper() for x in dfs['conveniados']['Nome do Médico Conveniado'] if pd.notna(x))
     set_blindagem = set(limpar_numero(x) for x in dfs['blindagem']['Código Prestador Protegido'] if pd.notna(x))
     dict_itens = {limpar_numero(k): limpar_numero(v) for k, v in zip(dfs['itens']['Código Incorreto'], dfs['itens']['Código Correto']) if pd.notna(k)}
+    dict_unidades = {limpar_numero(r['Código do Item']): limpar_numero(r['Unidade de Medida Correta']) for _, r in dfs['unidades'].iterrows() if pd.notna(r['Código do Item'])}
+    dict_anvisa = {limpar_numero(r['Código do Item']): r for _, r in dfs['anvisa'].iterrows() if pd.notna(r['Código do Item'])}
 
     for guia in root.findall('.//ans:guiaResumoInternacao', NS):
         carteira_elem = guia.find('.//ans:dadosBeneficiario/ans:numeroCarteira', NS)
@@ -185,9 +224,12 @@ def processar_xml_tiss(arquivo_xml, dfs):
                         cbo_novo = limpar_numero(regra_m['CBO Correto'])
                         
                         if cbo_elem is not None and cbo_novo != '':
+                            if cbo_novo.endswith('.0'):
+                                cbo_novo = cbo_novo[:-2]
                             cbo_elem.text = cbo_novo
                         
-                        if str(regra_m['Substituir por Cód. Operadora']).strip().upper() in ['SIM', 'S', 'TRUE'] and cod_prof_container is not None:
+                        val_subst = str(regra_m['Substituir por Cód. Operadora']).strip().upper()
+                        if (val_subst in ['SIM', 'S', 'TRUE'] or '<' in val_subst) and cod_prof_container is not None:
                             cod_prof_container.clear()
                             nova_tag = ET.SubElement(cod_prof_container, ans_tag('codigoPrestadorNaOperadora'))
                             nova_tag.text = limpar_numero(regra_m['Código na Operadora'])
@@ -222,7 +264,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
         if despesas_container is not None:
             for despesa in despesas_container.findall('ans:despesa', NS):
                 servicos = despesa.find('ans:servicosExecutados', NS)
-                if list(servicos):
+                if servicos is not None:
                     cod_item_elem = servicos.find('ans:codigoProcedimento', NS)
                     cod_item = cod_item_elem.text.strip() if cod_item_elem is not None and cod_item_elem.text else ""
                     
@@ -237,35 +279,65 @@ def processar_xml_tiss(arquivo_xml, dfs):
                         if h_ini is not None and h_fim is not None and qtd_ex is not None:
                             h_fim.text = calcular_tempo_oxigenio(h_ini.text, qtd_ex.text, cod_item)
 
+                    # 1. Correção da Unidade de Medida
+                    if cod_item in dict_unidades:
+                        unidade_elem = servicos.find('ans:unidadeMedida', NS)
+                        if unidade_elem is not None:
+                            unidade_elem.text = dict_unidades[cod_item]
+                        else:
+                            unidade_elem = ET.Element(ans_tag('unidadeMedida'))
+                            unidade_elem.text = dict_unidades[cod_item]
+                            servicos.append(unidade_elem)
+
+                    # 2. Injeção Dinâmica de Registro ANVISA e Fabricante em Falta
+                    if cod_item in dict_anvisa:
+                        regra_a = dict_anvisa[cod_item]
+                        anvisa_alvo = limpar_numero(regra_a['Registro ANVISA'])
+                        ref_alvo = limpar_numero(regra_a['Ref. Fabricante'])
+                        
+                        anvisa_existente = servicos.find('ans:registroANVISA', NS)
+                        ref_existente = servicos.find('ans:codigoRefFabricante', NS)
+                        
+                        add_anvisa = anvisa_alvo != "" and (anvisa_existente is None or not anvisa_existente.text or anvisa_existente.text.strip() == "")
+                        add_ref = ref_alvo != "" and (ref_existente is None or not ref_existente.text or ref_existente.text.strip() == "")
+                        
+                        if add_anvisa or add_ref:
+                            reordenar_servico_executado(
+                                servicos, 
+                                nova_anvisa=anvisa_alvo if add_anvisa else None, 
+                                nova_ref=ref_alvo if add_ref else None
+                            )
+
     # ==========================================
-    # CÁLCULO DO HASH (SIMULANDO O AMBIENTE WINDOWS)
+    # CÁLCULO ESTRUTURAL DO HASH TISS (MÉTODO ULTRA COMPATÍVEL)
     # ==========================================
     hash_node = None
     for elem in root.iter():
         if tag_limpa(elem) == 'hash':
             hash_node = elem
-            hash_node.text = "HASH_PLACEHOLDER_SEGURO"
+            hash_node.text = ""
             break
 
     temp_buffer = io.BytesIO()
-    tree.write(temp_buffer, encoding='iso-8859-1', xml_declaration=True)
+    tree.write(temp_buffer, encoding='ISO-8859-1', xml_declaration=True, short_empty_elements=False)
     xml_bytes = temp_buffer.getvalue()
 
-    # Ajuste de aspas na declaração XML para agradar ao Validador
-    if b"<?xml version='1.0' encoding='iso-8859-1'?>" in xml_bytes:
+    # Normalização absoluta de cabeçalhos e quebras de linha padrão Windows (CRLF)
+    if b"<?xml version='1.0' encoding='ISO-8859-1'?>" in xml_bytes:
+        xml_bytes = xml_bytes.replace(b"<?xml version='1.0' encoding='ISO-8859-1'?>", b'<?xml version="1.0" encoding="ISO-8859-1"?>')
+    elif b"<?xml version='1.0' encoding='iso-8859-1'?>" in xml_bytes:
         xml_bytes = xml_bytes.replace(b"<?xml version='1.0' encoding='iso-8859-1'?>", b'<?xml version="1.0" encoding="ISO-8859-1"?>')
 
-    # O SEGREDO: Força o ficheiro inteiro a usar quebras de linha do Windows (CRLF)
+    # Forçar padronização estrita de quebras de linha Windows CRLF
     xml_bytes = xml_bytes.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
 
-    # Prepara o ficheiro para cálculo deixando a tag hash rigorosamente vazia
-    bytes_para_calculo = xml_bytes.replace(b"<ans:hash>HASH_PLACEHOLDER_SEGURO</ans:hash>", b"<ans:hash></ans:hash>")
-    
-    # Calcula a matemática perfeita
-    md5_hash = hashlib.md5(bytes_para_calculo).hexdigest()
-    
-    # Injeta a Hash final de volta no ficheiro
-    final_xml = bytes_para_calculo.replace(b"<ans:hash></ans:hash>", f"<ans:hash>{md5_hash}</ans:hash>".encode('iso-8859-1'))
+    # Calcula a assinatura MD5 correta
+    md5_hash = hashlib.md5(xml_bytes).hexdigest()
+
+    if hash_node is not None:
+        final_xml = xml_bytes.replace(b'<ans:hash></ans:hash>', f'<ans:hash>{md5_hash}</ans:hash>'.encode('ISO-8859-1'))
+    else:
+        final_xml = xml_bytes
 
     return final_xml
 
@@ -277,7 +349,6 @@ st.markdown("Configure as regras operacionais abaixo. Os seus dados ficam salvos
 
 with st.sidebar:
     st.header("☁️ Conexão em Nuvem")
-    
     if st.button("📥 Baixar Regras da Nuvem", type="primary", use_container_width=True):
         carregar_do_sheets()
         st.rerun()
@@ -301,18 +372,20 @@ with st.sidebar:
         use_container_width=True
     )
 
-aba_principal, aba_m, aba_p, aba_c, aba_b, aba_i = st.tabs([
+# Criação das abas, incluindo as duas novas solicitadas
+aba_principal, aba_m, aba_p, aba_c, aba_b, aba_i, aba_u, aba_a = st.tabs([
     "🚀 Processar XML", 
     "👥 1. Médicos e CBO", 
     "🏥 2. Regras de Procedimento", 
     "🚫 3. Médicos Conveniados", 
     "🛡️ 4. Blindagem de Clínicas", 
-    "🔄 5. De-Para de Códigos"
+    "🔄 5. De-Para de Códigos",
+    "📦 6. Unidades de Medida",
+    "🩺 7. Registro ANVISA e Fabricante"
 ])
 
 with aba_principal:
     st.header("Processamento de Lotes TISS")
-    
     xml_up = st.file_uploader("Selecione o ficheiro XML Hospitalar", type=['xml'])
     if xml_up:
         if st.button("Executar Correções Avançadas", type="primary", use_container_width=True):
@@ -320,11 +393,13 @@ with aba_principal:
                 dfs_atuais = {k: st.session_state[f'tab_{k}'] for k in tabelas_padrao.keys()}
                 xml_resultado = processar_xml_tiss(xml_up, dfs_atuais)
                 
-                st.success("✅ O XML está pronto e o Hash calculado com formato Windows!")
+                st.success("✅ O XML está pronto e o Hash foi recalculado com precisão absoluta!")
+                
                 st.subheader("📋 XML Corrigido Pronto para Cópia")
                 st.info("Clique no botão de copiar no canto superior direito do quadro abaixo, cole no Validador TISS e gere a Hash correta.")
-
-                st.code(xml_resultado, language='xml')
+                st.code(xml_resultado.decode('ISO-8859-1'), language='xml')
+                
+                st.divider()
                 st.download_button(
                     label="📥 Baixar XML Corrigido para Postagem",
                     data=xml_resultado,
@@ -349,3 +424,13 @@ with aba_b:
 
 with aba_i:
     st.session_state['tab_itens'] = st.data_editor(st.session_state['tab_itens'], num_rows="dynamic", use_container_width=True)
+
+with aba_u:
+    st.markdown("### 📦 Ajuste de Unidades de Medida de Itens")
+    st.caption("Cadastre o código do item e qual deve ser a unidade de medida padrão (ex: 036, 014, etc.)")
+    st.session_state['tab_unidades'] = st.data_editor(st.session_state['tab_unidades'], num_rows="dynamic", use_container_width=True)
+
+with aba_a:
+    st.markdown("### 🩺 Validador e Injetor de Registro ANVISA e Fabricante")
+    st.caption("Adicione os itens e seus respectivos registros. O sistema verificará se as tags estão faltando no XML original e injetará os valores seguindo as regras de ordenação da ANS.")
+    st.session_state['tab_anvisa'] = st.data_editor(st.session_state['tab_anvisa'], num_rows="dynamic", use_container_width=True)

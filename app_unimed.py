@@ -1,3 +1,4 @@
+import hashlib
 import streamlit as st
 import xml.etree.ElementTree as ET
 import pandas as pd
@@ -252,6 +253,31 @@ def processar_xml_tiss(arquivo_xml, dfs):
                         qtd_ex = servicos.find('ans:quantidadeExecutada', NS)
                         if h_ini is not None and h_fim is not None and qtd_ex is not None:
                             h_fim.text = calcular_tempo_oxigenio(h_ini.text, qtd_ex.text, cod_item)
+
+    # ==========================================
+    # RECALCULAR O HASH MD5 DO ARQUIVO TISS
+    # ==========================================
+    hash_node = None
+    mensagem_tiss = None
+
+    for elem in root.iter():
+        if elem.tag.endswith('hash'):
+            hash_node = elem
+        if elem.tag.endswith('mensagemTISS'):
+            mensagem_tiss = elem
+
+    if hash_node is not None and mensagem_tiss is not None:
+        # 1. A tag hash DEVE estar vazia no momento do cálculo
+        hash_node.text = ""
+        
+        # 2. Extrai apenas o conteúdo interno (texto), ignorando as tags XML
+        texto_puro = "".join(mensagem_tiss.itertext())
+        
+        # 3. Calcula o MD5 usando o encoding obrigatório ISO-8859-1
+        novo_hash = hashlib.md5(texto_puro.encode('iso-8859-1', errors='ignore')).hexdigest()
+        
+        # 4. Atualiza a tag no XML
+        hash_node.text = novo_hash
 
     # Re-gerar string XML modificada
     xml_buffer = io.BytesIO()

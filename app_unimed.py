@@ -3,6 +3,7 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 import io
 from datetime import datetime, timedelta
+from streamlit_gsheets import GSheetsConnection
 
 st.set_page_config(page_title="Faturamento TISS Cloud - Unimed", layout="wide", page_icon="🛠️")
 
@@ -34,18 +35,29 @@ for chave, df_padrao in tabelas_padrao.items():
     if f'tab_{chave}' not in st.session_state:
         st.session_state[f'tab_{chave}'] = df_padrao
 
-# Função para tentar carregar do Google Sheets se configurado
-def carregar_dados_nuvem():
+# Função para CARREGAR da Nuvem
+def carregar_do_sheets():
     try:
-        # Se o usuário configurou os secrets do GSheets no Streamlit Cloud
-        if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
-            from streamlit_gsheets import GSheetsConnection
-            conn = st.connection("gsheets", type=GSheetsConnection)
-            # Carrega cada aba (requer configuração de múltiplos worksheets se desejado)
-            # Para simplificar e rodar nativamente, mantemos o fallback local funcional
-            pass
-    except Exception:
-        pass
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        for aba in tabelas_padrao.keys():
+            df = conn.read(worksheet=aba, ttl=0)
+            if not df.empty:
+                st.session_state[f'tab_{aba}'] = df
+        st.success("✅ Regras carregadas do Google Sheets com sucesso!")
+    except Exception as e:
+        st.error(f"Erro ao carregar da nuvem. Erro: {e}")
+
+# Função para SALVAR na Nuvem
+def salvar_no_sheets():
+    try:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        for aba in tabelas_padrao.keys():
+            df_atual = st.session_state[f'tab_{aba}']
+            if not df_atual.empty:
+                conn.update(worksheet=aba, data=df_atual)
+        st.success("☁️ Todas as regras foram salvas no Google Sheets!")
+    except Exception as e:
+        st.error(f"Erro ao salvar na nuvem: {e}")
 
 # ==========================================
 # MOTOR DE CORREÇÃO DO XML (AS 8 REGRAS)
@@ -254,35 +266,31 @@ st.markdown("Configure as regras operacionais abaixo. Seus dados ficam salvos di
 
 # Sidebar de Ferramentas e Backup Manual
 with st.sidebar:
-    st.header("📦 Backup & Sincronismo")
-    st.info("Caso queira mover as regras manualmente entre computadores sem configurar o banco de dados:")
+    st.header("☁️ Conexão em Nuvem")
+    st.info("Sincronize as suas tabelas de regras diretamente com o seu Google Sheets.")
     
-    # Exportar regras atuais
+    if st.button("📥 Baixar Regras da Nuvem", type="primary", use_container_width=True):
+        carregar_do_sheets()
+        st.rerun()
+
+    if st.button("💾 Salvar Alterações na Nuvem", use_container_width=True):
+        salvar_no_sheets()
+        
+    st.divider()
+    st.caption("Uso Manual (Plano B):")
+    
     buffer_export = io.BytesIO()
     with pd.ExcelWriter(buffer_export, engine='xlsxwriter') as writer:
         for k in tabelas_padrao.keys():
-            st.session_state[f'tab_{k}'].to_sheet = st.session_state[f'tab_{k}'].to_excel(writer, sheet_name=k, index=False)
+            st.session_state[f'tab_{k}'].to_excel(writer, sheet_name=k, index=False)
     
     st.download_button(
-        label="📥 Exportar Regras (Excel)",
+        label="Exportar Regras (Excel)",
         data=buffer_export.getvalue(),
-        file_name="regras_faturamento_tiss.xlsx",
+        file_name="backup_emergencia_regras.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
-    
-    # Importar regras
-    arquivo_regras = st.file_uploader("📤 Importar Regras (Excel)", type=['xlsx'])
-    if arquivo_regras:
-        try:
-            xl = pd.ExcelFile(arquivo_regras)
-            for k in tabelas_padrao.keys():
-                if k in xl.sheet_names:
-                    st.session_state[f'tab_{k}'] = xl.parse(k)
-            st.success("Regras importadas com sucesso!")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Erro na importação: {e}")
 
 # Organização das Abas de Operação
 aba_principal, aba_m, aba_p, aba_c, aba_b, aba_i = st.tabs([

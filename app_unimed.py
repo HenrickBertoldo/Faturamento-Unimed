@@ -23,7 +23,6 @@ def tag_limpa(element):
 # ==========================================
 # PERSISTÊNCIA DE DADOS (GOOGLE SHEETS / LOCAL)
 # ==========================================
-# Inicialização das tabelas na sessão caso a nuvem esteja offline
 tabelas_padrao = {
     'medicos': pd.DataFrame(columns=['Nome do Médico', 'CBO Correto', 'Substituir por Cód. Operadora', 'Código na Operadora']),
     'procedimentos': pd.DataFrame(columns=['Código do Procedimento', 'Grau Part Obrigatório', 'Via de Acesso (1, 2 ou EXCLUIR)', 'Técnica (1, 2 ou EXCLUIR)']),
@@ -36,7 +35,6 @@ for chave, df_padrao in tabelas_padrao.items():
     if f'tab_{chave}' not in st.session_state:
         st.session_state[f'tab_{chave}'] = df_padrao
 
-# Função para CARREGAR da Nuvem
 def carregar_do_sheets():
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
@@ -48,7 +46,6 @@ def carregar_do_sheets():
     except Exception as e:
         st.error(f"Erro ao carregar da nuvem. Erro: {e}")
 
-# Função para SALVAR na Nuvem
 def salvar_no_sheets():
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
@@ -78,7 +75,6 @@ def calcular_tempo_oxigenio(hora_ini_str, qtd_executada, tipo_unidade):
         return hora_ini_str
 
 def reordenar_e_ajustar_via_tecnica(proc_elem, via_acao, tec_acao):
-    """Reconstrói o bloco do procedimento mantendo a ordem estrita do XSD da ANS"""
     children_dict = {}
     equipes = []
     
@@ -93,7 +89,6 @@ def reordenar_e_ajustar_via_tecnica(proc_elem, via_acao, tec_acao):
             
     proc_elem.clear()
     
-    # Sequência estrutural padrão exigida pelo validador TISS
     sequencia_tiss = [
         'sequencialItem', 'dataExecucao', 'horaInicial', 'horaFinal', 
         'procedimento', 'quantidadeExecutada', 'viaAcesso', 'tecnicaUtilizada', 
@@ -122,22 +117,16 @@ def processar_xml_tiss(arquivo_xml, dfs):
     tree = ET.parse(arquivo_xml)
     root = tree.getroot()
     
-    # Mapeamento rápido de regras dos DataFrames
     dict_medicos = {str(r['Nome do Médico']).strip().upper(): r for _, r in dfs['medicos'].iterrows()}
     dict_procs = {str(r['Código do Procedimento']).strip(): r for _, r in dfs['procedimentos'].iterrows()}
     set_conveniados = set(dfs['conveniados']['Nome do Médico Conveniado'].str.strip().str.upper())
     set_blindagem = set(dfs['blindagem']['Código Prestador Protegido'].astype(str).str.strip())
     dict_itens = dict(zip(dfs['itens']['Código Incorreto'].astype(str).str.strip(), dfs['itens']['Código Correto'].astype(str).str.strip()))
 
-    # Varre todas as guias do lote
     for guia in root.findall('.//ans:guiaResumoInternacao', NS):
-        # Captura o número da carteira do paciente
         carteira_elem = guia.find('.//ans:dadosBeneficiario/ans:numeroCarteira', NS)
         is_uberlandia = carteira_elem is not None and carteira_elem.text.strip().startswith('0014')
 
-        # --------------------------------------------------
-        # TRATAMENTO DE PROCEDIMENTOS EXECUTADOS E EQUIPES
-        # --------------------------------------------------
         procs_container = guia.find('.//ans:procedimentosExecutados', NS)
         if procs_container is not None:
             procedimentos_para_remover = []
@@ -146,12 +135,10 @@ def processar_xml_tiss(arquivo_xml, dfs):
                 cod_proc_elem = proc_exec.find('.//ans:procedimento/ans:codigoProcedimento', NS)
                 cod_proc = cod_proc_elem.text.strip() if cod_proc_elem is not None and cod_proc_elem.text else ""
 
-                # Regra 5: Substituição de código de item (Contrato)
                 if cod_proc in dict_itens:
                     cod_proc_elem.text = dict_itens[cod_proc]
                     cod_proc = dict_itens[cod_proc]
 
-                # Regra 4: Cálculo automático do Oxigênio (Procedimentos)
                 if cod_proc in ['60034335', '60034343']:
                     h_ini = proc_exec.find('ans:horaInicial', NS)
                     h_fim = proc_exec.find('ans:horaFinal', NS)
@@ -159,7 +146,6 @@ def processar_xml_tiss(arquivo_xml, dfs):
                     if h_ini is not None and h_fim is not None and qtd_ex is not None:
                         h_fim.text = calcular_tempo_oxigenio(h_ini.text, qtd_ex.text, cod_proc)
 
-                # Regra 8: Gestão de Via de Acesso e Técnica
                 if cod_proc in dict_procs:
                     regra_p = dict_procs[cod_proc]
                     reordenar_e_ajustar_via_tecnica(
@@ -168,7 +154,6 @@ def processar_xml_tiss(arquivo_xml, dfs):
                         regra_p.get('Técnica (1, 2 ou EXCLUIR)')
                     )
 
-                # Analisar equipe do procedimento
                 equipes = proc_exec.findall('ans:identEquipe', NS)
                 equipes_para_remover = []
                 
@@ -184,55 +169,41 @@ def processar_xml_tiss(arquivo_xml, dfs):
                     grau_elem = ident_eq.find('ans:grauPart', NS)
                     cod_prof_container = ident_eq.find('ans:codProfissional', NS)
 
-                    # Regra 1 e 2: Ajuste de CBO e Tipo de Tag de Identificação (CPF vs Cód Prestador)
                     if nome_prof in dict_medicos:
                         regra_m = dict_medicos[nome_prof]
-                        # Ajuste do CBO
                         if cbo_elem is not None and str(regra_m['CBO Correto']).strip() != 'nan':
                             cbo_elem.text = str(regra_m['CBO Correto']).strip()
                         
-                        # Ajuste CPF -> Código Prestador
                         if str(regra_m['Substituir por Cód. Operadora']).strip().upper() in ['SIM', 'S', 'TRUE'] and cod_prof_container is not None:
                             cod_prof_container.clear()
                             nova_tag = ET.SubElement(cod_prof_container, ans_tag('codigoPrestadorNaOperadora'))
                             nova_tag.text = str(regra_m['Código na Operadora']).strip()
 
-                    # Regra 3: Grau de participação obrigatório por procedimento
                     if cod_proc in dict_procs and grau_elem is not None:
                         regra_p = dict_procs[cod_proc]
                         if str(regra_p['Grau Part Obrigatório']).strip() != 'nan' and str(regra_p['Grau Part Obrigatório']).strip() != "":
                             grau_elem.text = str(regra_p['Grau Part Obrigatório']).strip()
 
-                    # Regra 6 e 7: Exclusão Inteligente de Médicos Conveniados (Carteira 0014) + Blindagem
                     if is_uberlandia and (cod_proc.startswith('1') or cod_proc.startswith('3')):
-                        # Checa se o médico possui blindagem pelo código do prestador
                         cod_prest_elem = ident_eq.find('.//ans:codigoPrestadorNaOperadora', NS)
                         cod_prest = cod_prest_elem.text.strip() if cod_prest_elem is not None and cod_prest_elem.text else ""
                         
                         if cod_prest in set_blindagem:
-                            continue # Médico blindado! Ignora regra de exclusão.
+                            continue
                         
-                        # Se for conveniado, marca para remoção
                         if nome_prof in set_conveniados:
                             equipes_para_remover.append(eq)
 
-                # Decisão de exclusão (Solo vs Mista)
                 if len(equipes_para_remover) > 0:
                     if len(equipes) == len(equipes_para_remover):
-                        # Todos os médicos da equipe são conveniados -> Apaga o procedimento inteiro
                         procedimentos_para_remover.append(proc_exec)
                     else:
-                        # Equipe Mista -> Remove apenas as tags <ans:identEquipe> dos conveniados
                         for eq_rem in equipes_para_remover:
                             proc_exec.remove(eq_rem)
 
-            # Efetua a remoção dos procedimentos solo marcados
             for p_rem in procedimentos_para_remover:
                 procs_container.remove(p_rem)
 
-        # --------------------------------------------------
-        # TRATAMENTO DE OUTRAS DESPESAS (MAT/MED/OXIGÊNIO)
-        # --------------------------------------------------
         despesas_container = guia.find('.//ans:outrasDespesas', NS)
         if despesas_container is not None:
             for despesa in despesas_container.findall('ans:despesa', NS):
@@ -241,12 +212,10 @@ def processar_xml_tiss(arquivo_xml, dfs):
                     cod_item_elem = servicos.find('ans:codigoProcedimento', NS)
                     cod_item = cod_item_elem.text.strip() if cod_item_elem is not None and cod_item_elem.text else ""
                     
-                    # Regra 5: Substituição de código de itens em despesas
                     if cod_item in dict_itens:
                         cod_item_elem.text = dict_itens[cod_item]
                         cod_item = dict_itens[cod_item]
 
-                    # Regra 4: Cálculo automático do Oxigênio (Despesas)
                     if cod_item in ['60034335', '60034343']:
                         h_ini = servicos.find('ans:horaInicial', NS)
                         h_fim = servicos.find('ans:horaFinal', NS)
@@ -255,42 +224,49 @@ def processar_xml_tiss(arquivo_xml, dfs):
                             h_fim.text = calcular_tempo_oxigenio(h_ini.text, qtd_ex.text, cod_item)
 
     # ==========================================
-    # RECALCULAR O HASH MD5 DO ARQUIVO TISS
+    # CÁLCULO ESTRUTURAL DO HASH TISS (ISO-8859-1)
     # ==========================================
     hash_node = None
-    mensagem_tiss = None
-
     for elem in root.iter():
-        if elem.tag.endswith('hash'):
+        if tag_limpa(elem) == 'hash':
             hash_node = elem
-        if elem.tag.endswith('mensagemTISS'):
-            mensagem_tiss = elem
+            break
 
-    if hash_node is not None and mensagem_tiss is not None:
-        # 1. A tag hash DEVE estar vazia no momento do cálculo
+    if hash_node is not None:
+        # 1. Esvazia a tag hash
         hash_node.text = ""
+
+        # 2. Gera a estrutura do ficheiro em memória (norma exige codificação ISO-8859-1)
+        temp_buffer = io.BytesIO()
+        tree.write(temp_buffer, encoding='iso-8859-1', xml_declaration=True)
+        xml_bytes = temp_buffer.getvalue()
+
+        # O validador TISS costuma ser estrito com as aspas na declaração inicial do ficheiro
+        if xml_bytes.startswith(b"<?xml version='1.0' encoding='iso-8859-1'?>"):
+            xml_bytes = xml_bytes.replace(b"<?xml version='1.0' encoding='iso-8859-1'?>", b'<?xml version="1.0" encoding="ISO-8859-1"?>')
+
+        # 3. Calcula o MD5 de toda a estrutura gerada
+        novo_hash = hashlib.md5(xml_bytes).hexdigest()
         
-        # 2. Extrai apenas o conteúdo interno (texto), ignorando as tags XML
-        texto_puro = "".join(mensagem_tiss.itertext())
-        
-        # 3. Calcula o MD5 usando o encoding obrigatório ISO-8859-1
-        novo_hash = hashlib.md5(texto_puro.encode('iso-8859-1', errors='ignore')).hexdigest()
-        
-        # 4. Atualiza a tag no XML
+        # 4. Preenche a tag com a nova assinatura validada
         hash_node.text = novo_hash
 
-    # Re-gerar string XML modificada
+    # Gera o ficheiro final com o hash correto para descarregar
     xml_buffer = io.BytesIO()
-    tree.write(xml_buffer, encoding='utf-8', xml_declaration=True)
-    return xml_buffer.getvalue()
+    tree.write(xml_buffer, encoding='iso-8859-1', xml_declaration=True)
+    final_xml = xml_buffer.getvalue()
+
+    if final_xml.startswith(b"<?xml version='1.0' encoding='iso-8859-1'?>"):
+        final_xml = final_xml.replace(b"<?xml version='1.0' encoding='iso-8859-1'?>", b'<?xml version="1.0" encoding="ISO-8859-1"?>')
+
+    return final_xml
 
 # ==========================================
 # INTERFACE GRÁFICA (STREAMLIT APP)
 # ==========================================
 st.title("🛠️ Sistema Integrado Cloud TISS - Unimed Uberlândia")
-st.markdown("Configure as regras operacionais abaixo. Seus dados ficam salvos dinamicamente na nuvem do aplicativo.")
+st.markdown("Configure as regras operacionais abaixo. Os seus dados ficam salvos dinamicamente na nuvem do aplicativo.")
 
-# Sidebar de Ferramentas e Backup Manual
 with st.sidebar:
     st.header("☁️ Conexão em Nuvem")
     st.info("Sincronize as suas tabelas de regras diretamente com o seu Google Sheets.")
@@ -318,7 +294,6 @@ with st.sidebar:
         use_container_width=True
     )
 
-# Organização das Abas de Operação
 aba_principal, aba_m, aba_p, aba_c, aba_b, aba_i = st.tabs([
     "🚀 Processar XML", 
     "👥 1. Médicos e CBO", 
@@ -330,9 +305,9 @@ aba_principal, aba_m, aba_p, aba_c, aba_b, aba_i = st.tabs([
 
 with aba_principal:
     st.header("Processamento de Lotes TISS")
-    st.markdown("Faça o upload do arquivo XML gerado pelo hospital para aplicar de forma combinada todas as 8 regras configuradas.")
+    st.markdown("Faça o upload do ficheiro XML gerado pelo hospital para aplicar de forma combinada todas as 8 regras configuradas.")
     
-    xml_up = st.file_uploader("Selecione o arquivo XML Hospitalar", type=['xml'])
+    xml_up = st.file_uploader("Selecione o ficheiro XML Hospitalar", type=['xml'])
     if xml_up:
         if st.button("Executar Correções Avançadas", type="primary", use_container_width=True):
             try:

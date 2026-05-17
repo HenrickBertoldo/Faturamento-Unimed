@@ -3,7 +3,6 @@ import streamlit as st
 import xml.etree.ElementTree as ET
 import pandas as pd
 import io
-import re
 from datetime import datetime, timedelta
 from streamlit_gsheets import GSheetsConnection
 
@@ -239,36 +238,34 @@ def processar_xml_tiss(arquivo_xml, dfs):
                             h_fim.text = calcular_tempo_oxigenio(h_ini.text, qtd_ex.text, cod_item)
 
     # ==========================================
-    # CÁLCULO ESTRUTURAL DO HASH TISS (A TÉCNICA DA MINIFICAÇÃO)
+    # CÁLCULO DO HASH (SIMULANDO O AMBIENTE WINDOWS)
     # ==========================================
     hash_node = None
     for elem in root.iter():
         if tag_limpa(elem) == 'hash':
             hash_node = elem
-            # Marca o local do hash temporariamente
-            hash_node.text = "HASH_TEMPORARIO_INFALIVEL_TISS"
+            hash_node.text = "HASH_PLACEHOLDER_SEGURO"
             break
 
     temp_buffer = io.BytesIO()
-    tree.write(temp_buffer, encoding='ISO-8859-1', xml_declaration=True)
+    tree.write(temp_buffer, encoding='iso-8859-1', xml_declaration=True)
     xml_bytes = temp_buffer.getvalue()
 
-    # 1. MINIFICAÇÃO EXTREMA: Esmaga o ficheiro removendo todas as quebras de linha entre as tags.
-    # Isso destrói a possibilidade de erro de leitura (LF vs CRLF) no sistema da Unimed.
-    xml_bytes = re.sub(b'>[ \t\r\n]+<', b'><', xml_bytes)
+    # Ajuste de aspas na declaração XML para agradar ao Validador
+    if b"<?xml version='1.0' encoding='iso-8859-1'?>" in xml_bytes:
+        xml_bytes = xml_bytes.replace(b"<?xml version='1.0' encoding='iso-8859-1'?>", b'<?xml version="1.0" encoding="ISO-8859-1"?>')
 
-    # 2. Assegura a declaração XML exata com apenas UMA quebra de linha no topo
-    xml_bytes = re.sub(b"^<\?xml.*?\?>", b'<?xml version="1.0" encoding="ISO-8859-1"?>\r\n', xml_bytes)
+    # O SEGREDO: Força o ficheiro inteiro a usar quebras de linha do Windows (CRLF)
+    xml_bytes = xml_bytes.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
 
-    if hash_node is not None:
-        # 3. Calcula o MD5 com a tag hash rigorosamente vazia
-        bytes_para_calculo = xml_bytes.replace(b"<ans:hash>HASH_TEMPORARIO_INFALIVEL_TISS</ans:hash>", b"<ans:hash></ans:hash>")
-        novo_hash = hashlib.md5(bytes_para_calculo).hexdigest()
-        
-        # 4. Injeta o código matemático correto no XML esmagado
-        final_xml = xml_bytes.replace(b"HASH_TEMPORARIO_INFALIVEL_TISS", novo_hash.encode('ISO-8859-1'))
-    else:
-        final_xml = xml_bytes
+    # Prepara o ficheiro para cálculo deixando a tag hash rigorosamente vazia
+    bytes_para_calculo = xml_bytes.replace(b"<ans:hash>HASH_PLACEHOLDER_SEGURO</ans:hash>", b"<ans:hash></ans:hash>")
+    
+    # Calcula a matemática perfeita
+    md5_hash = hashlib.md5(bytes_para_calculo).hexdigest()
+    
+    # Injeta a Hash final de volta no ficheiro
+    final_xml = bytes_para_calculo.replace(b"<ans:hash></ans:hash>", f"<ans:hash>{md5_hash}</ans:hash>".encode('iso-8859-1'))
 
     return final_xml
 
@@ -323,7 +320,7 @@ with aba_principal:
                 dfs_atuais = {k: st.session_state[f'tab_{k}'] for k in tabelas_padrao.keys()}
                 xml_resultado = processar_xml_tiss(xml_up, dfs_atuais)
                 
-                st.success("✅ O XML está minificado e blindado contra erros de quebra de linha (LF/CRLF)!")
+                st.success("✅ O XML está pronto e o Hash calculado com formato Windows!")
                 
                 st.download_button(
                     label="📥 Baixar XML Corrigido para Postagem",

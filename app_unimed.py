@@ -22,7 +22,6 @@ def tag_limpa(element):
     return element.tag.split('}')[-1] if '}' in element.tag else element.tag
 
 def limpar_numero(valor):
-    """Garante que o valor seja tratado como texto limpo e preserva zeros à esquerda"""
     v = str(valor).strip()
     if v.lower() in ['nan', 'none', '<na>', '']:
         return ''
@@ -33,7 +32,7 @@ def limpar_numero(valor):
     return v
 
 # ==========================================
-# PERSISTÊNCIA DE DADOS (GOOGLE SHEETS)
+# ESTRUTURA PADRÃO DAS TABELAS
 # ==========================================
 tabelas_padrao = {
     'medicos': pd.DataFrame(columns=['Nome do Médico', 'CBO Correto', 'Substituir por Cód. Operadora', 'Código na Operadora']),
@@ -45,23 +44,41 @@ tabelas_padrao = {
     'anvisa': pd.DataFrame(columns=['Código do Item', 'Registro ANVISA', 'Ref. Fabricante'])
 }
 
-for chave, df_padrao in tabelas_padrao.items():
-    if f'tab_{chave}' not in st.session_state:
-        st.session_state[f'tab_{chave}'] = df_padrao
-
-def carregar_do_sheets():
+# ==========================================
+# FUNÇÕES DE BANCO DE DADOS (GOOGLE SHEETS)
+# ==========================================
+def carregar_do_sheets_silencioso():
+    """Busca os dados na nuvem sem exibir mensagens de sucesso na tela"""
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         for aba in tabelas_padrao.keys():
             df = conn.read(worksheet=aba, ttl=0)
-            if not df.empty:
-                # Força todas as colunas de códigos lidas a virarem string
+            if df is not None and not df.empty:
                 for col in df.columns:
                     df[col] = df[col].astype(str).apply(limpar_numero)
                 st.session_state[f'tab_{aba}'] = df
-        st.success("✅ Regras carregadas do Google Sheets com sucesso!")
+            else:
+                if f'tab_{aba}' not in st.session_state:
+                    st.session_state[f'tab_{aba}'] = tabelas_padrao[aba]
+    except:
+        # Caso falhe a conexão por rede, garante que o app inicie vazio em vez de quebrar
+        for aba in tabelas_padrao.keys():
+            if f'tab_{aba}' not in st.session_state:
+                st.session_state[f'tab_{aba}'] = tabelas_padrao[aba]
+
+def carregar_do_sheets_manual():
+    """Força o recarregamento manual exibindo alertas na tela"""
+    try:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        for aba in tabelas_padrao.keys():
+            df = conn.read(worksheet=aba, ttl=0)
+            if df is not None and not df.empty:
+                for col in df.columns:
+                    df[col] = df[col].astype(str).apply(limpar_numero)
+                st.session_state[f'tab_{aba}'] = df
+        st.success("✅ Todas as regras foram recarregadas da nuvem!")
     except Exception as e:
-        st.error(f"Erro ao carregar da nuvem. Erro: {e}")
+        st.error(f"Erro ao conectar com o Google Sheets: {e}")
 
 def salvar_no_sheets():
     try:
@@ -72,9 +89,16 @@ def salvar_no_sheets():
                 for col in df_atual.columns:
                     df_atual[col] = df_atual[col].astype(str).apply(limpar_numero)
                 conn.update(worksheet=aba, data=df_atual)
-        st.success("☁️ Todas as regras foram salvas no Google Sheets!")
+        st.success("☁️ Alterações gravadas na nuvem com sucesso!")
     except Exception as e:
         st.error(f"Erro ao salvar na nuvem: {e}")
+
+# 🔒 TRAVA 1: CARREGAMENTO AUTOMÁTICO AO ABRIR A PÁGINA
+# Verifica se é a primeira vez que o app roda nesta sessão do navegador
+if "app_inicializado" not in st.session_state:
+    with st.spinner("Conectando à nuvem e sincronizando regras de faturamento..."):
+        carregar_do_sheets_silencioso()
+    st.session_state["app_inicializado"] = True
 
 # ==========================================
 # MOTOR DE CORREÇÃO DO XML 
@@ -96,7 +120,6 @@ def calcular_tempo_oxigenio(hora_ini_str, qtd_executada, tipo_unidade):
 def reordenar_e_ajustar_via_tecnica(proc_elem, via_acao, tec_acao):
     children_dict = {}
     equipes = []
-    
     for child in list(proc_elem):
         t_name = tag_limpa(child)
         if t_name in ['viaAcesso', 'tecnicaUtilizada']:
@@ -107,13 +130,11 @@ def reordenar_e_ajustar_via_tecnica(proc_elem, via_acao, tec_acao):
             children_dict[t_name] = child
             
     proc_elem.clear()
-    
     sequencia_tiss = [
         'sequencialItem', 'dataExecucao', 'horaInicial', 'horaFinal', 
         'procedimento', 'quantidadeExecutada', 'viaAcesso', 'tecnicaUtilizada', 
         'reducaoAcrescimo', 'valorUnitario', 'valorTotal', 'faturamentoCumulativo'
     ]
-    
     for tag in sequencia_tiss:
         if tag == 'viaAcesso':
             if via_acao and via_acao.upper() != 'EXCLUIR' and via_acao != '':
@@ -128,7 +149,6 @@ def reordenar_e_ajustar_via_tecnica(proc_elem, via_acao, tec_acao):
         else:
             if tag in children_dict:
                 proc_elem.append(children_dict[tag])
-                
     for eq in equipes:
         proc_elem.append(eq)
 
@@ -136,7 +156,6 @@ def reordenar_servico_executado(servicos_node, nova_anvisa=None, nova_ref=None):
     valores = {}
     for c in list(servicos_node):
         valores[tag_limpa(c)] = c
-    
     servicos_node.clear()
     
     ordem_tiss = [
@@ -144,7 +163,6 @@ def reordenar_servico_executado(servicos_node, nova_anvisa=None, nova_ref=None):
         'quantidadeExecutada', 'unidadeMedida', 'reducaoAcrescimo', 'valorUnitario', 'valorTotal',
         'descricaoProcedimento', 'registroANVISA', 'codigoRefFabricante'
     ]
-    
     for tag in ordem_tiss:
         if tag == 'registroANVISA' and nova_anvisa:
             el = ET.Element(ans_tag('registroANVISA'))
@@ -166,7 +184,6 @@ def reordenar_servico_executado(servicos_node, nova_anvisa=None, nova_ref=None):
             servicos_node.append(valores['codigoRefFabricante'])
 
 def padronizar_codigo_8_digitos(cod):
-    """Se o usuário digitar ou colar um código de item com 7 dígitos, restaura o 0 na esquerda"""
     c = limpar_numero(cod)
     if len(c) == 7 and c.isdigit():
         return "0" + c
@@ -180,7 +197,6 @@ def processar_xml_tiss(arquivo_xml, dfs):
     dict_procs = {padronizar_codigo_8_digitos(r['Código do Procedimento']): r for _, r in dfs['procedimentos'].iterrows()}
     set_conveniados = set(str(x).strip().upper() for x in dfs['conveniados']['Nome do Médico Conveniado'] if pd.notna(x))
     set_blindagem = set(limpar_numero(x) for x in dfs['blindagem']['Código Prestador Protegido'] if pd.notna(x))
-    
     dict_itens = {padronizar_codigo_8_digitos(k): padronizar_codigo_8_digitos(v) for k, v in zip(dfs['itens']['Código Incorreto'], dfs['itens']['Código Correto']) if pd.notna(k)}
     dict_unidades = {padronizar_codigo_8_digitos(r['Código do Item']): limpar_numero(r['Unidade de Medida Correta']) for _, r in dfs['unidades'].iterrows() if pd.notna(r['Código do Item'])}
     dict_anvisa = {padronizar_codigo_8_digitos(r['Código do Item']): r for _, r in dfs['anvisa'].iterrows() if pd.notna(r['Código do Item'])}
@@ -192,7 +208,6 @@ def processar_xml_tiss(arquivo_xml, dfs):
         procs_container = guia.find('.//ans:procedimentosExecutados', NS)
         if procs_container is not None:
             procedimentos_para_remover = []
-            
             for proc_exec in procs_container.findall('ans:procedimentoExecutado', NS):
                 cod_proc_elem = proc_exec.find('.//ans:procedimento/ans:codigoProcedimento', NS)
                 cod_proc = padronizar_codigo_8_digitos(cod_proc_elem.text) if cod_proc_elem is not None and cod_proc_elem.text else ""
@@ -218,15 +233,12 @@ def processar_xml_tiss(arquivo_xml, dfs):
 
                 equipes = proc_exec.findall('ans:identEquipe', NS)
                 equipes_para_remover = []
-                
                 for eq in equipes:
                     ident_eq = eq.find('ans:identificacaoEquipe', NS)
                     if ident_eq is None:
                         continue
-                    
                     nome_prof_elem = ident_eq.find('ans:nomeProf', NS)
                     nome_prof = nome_prof_elem.text.strip().upper() if nome_prof_elem is not None and nome_prof_elem.text else ""
-                    
                     cbo_elem = ident_eq.find('ans:CBOS', NS)
                     grau_elem = ident_eq.find('ans:grauPart', NS)
                     cod_prof_container = ident_eq.find('ans:codProfissional', NS)
@@ -234,10 +246,8 @@ def processar_xml_tiss(arquivo_xml, dfs):
                     if nome_prof in dict_medicos:
                         regra_m = dict_medicos[nome_prof]
                         cbo_novo = limpar_numero(regra_m['CBO Correto'])
-                        
                         if cbo_elem is not None and cbo_novo != '':
                             cbo_elem.text = cbo_novo
-                        
                         val_subst = str(regra_m['Substituir por Cód. Operadora']).strip().upper()
                         if (val_subst in ['SIM', 'S', 'TRUE'] or '<' in val_subst) and cod_prof_container is not None:
                             cod_prof_container.clear()
@@ -253,10 +263,8 @@ def processar_xml_tiss(arquivo_xml, dfs):
                     if is_uberlandia and (cod_proc.startswith('1') or cod_proc.startswith('3')):
                         cod_prest_elem = ident_eq.find('.//ans:codigoPrestadorNaOperadora', NS)
                         cod_prest = cod_prest_elem.text.strip() if cod_prest_elem is not None and cod_prest_elem.text else ""
-                        
                         if cod_prest in set_blindagem:
                             continue
-                        
                         if nome_prof in set_conveniados:
                             equipes_para_remover.append(eq)
 
@@ -277,7 +285,6 @@ def processar_xml_tiss(arquivo_xml, dfs):
                 if servicos is not None:
                     cod_item_elem = servicos.find('ans:codigoProcedimento', NS)
                     cod_item = padronizar_codigo_8_digitos(cod_item_elem.text) if cod_item_elem is not None and cod_item_elem.text else ""
-                    
                     if cod_item in dict_itens:
                         cod_item_elem.text = dict_itens[cod_item]
                         cod_item = dict_itens[cod_item]
@@ -303,13 +310,11 @@ def processar_xml_tiss(arquivo_xml, dfs):
                         regra_a = dict_anvisa[cod_item]
                         anvisa_alvo = limpar_numero(regra_a['Registro ANVISA'])
                         ref_alvo = limpar_numero(regra_a['Ref. Fabricante'])
-                        
                         anvisa_existente = servicos.find('ans:registroANVISA', NS)
                         ref_existente = servicos.find('ans:codigoRefFabricante', NS)
                         
                         add_anvisa = anvisa_alvo != "" and (anvisa_existente is None or not anvisa_existente.text or anvisa_existente.text.strip() == "")
                         add_ref = ref_alvo != "" and (ref_existente is None or not ref_existente.text or ref_existente.text.strip() == "")
-                        
                         if add_anvisa or add_ref:
                             reordenar_servico_executado(
                                 servicos, 
@@ -317,7 +322,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
                                 nova_ref=ref_alvo if add_ref else None
                             )
 
-    # Cálculo do Hash
+    # Cálculo do Hash TISS
     hash_node = None
     for elem in root.iter():
         if tag_limpa(elem) == 'hash':
@@ -345,28 +350,46 @@ def processar_xml_tiss(arquivo_xml, dfs):
     return final_xml
 
 # ==========================================
-# INTERFACE GRÁFICA (FORÇANDO TIPAGEM TEXTO)
+# INTERFACE GRÁFICA
 # ==========================================
 st.title("🛠️ Sistema Integrado Cloud TISS - Unimed Uberlândia")
 st.markdown("Configure as regras operacionais abaixo. Os seus dados ficam salvos dinamicamente na nuvem do aplicativo.")
 
+# Configuração de Colunas de Texto Estrito
+config_texto_colunas = {
+    "Código do Item": st.column_config.TextColumn("Código do Item", help="Insira o código mantendo o zero à esquerda", required=True),
+    "Código Incorreto": st.column_config.TextColumn("Código Incorreto", required=True),
+    "Código Correto": st.column_config.TextColumn("Código Correto", required=True),
+    "Código do Procedimento": st.column_config.TextColumn("Código do Procedimento", required=True),
+    "Código Prestador Protegido": st.column_config.TextColumn("Código Prestador Protegido", required=True),
+    "Unidade de Medida Correta": st.column_config.TextColumn("Unidade de Medida Correta"),
+    "Registro ANVISA": st.column_config.TextColumn("Registro ANVISA"),
+    "Ref. Fabricante": st.column_config.TextColumn("Ref. Fabricante")
+}
+
 with st.sidebar:
-    st.header("☁️ Conexão em Nuvem")
-    if st.button("📥 Baixar Regras da Nuvem", type="primary", use_container_width=True):
-        carregar_do_sheets()
+    st.header("☁️ Gerenciamento da Nuvem")
+    
+    # Botão para baixar vira um recurso opcional de "forçar atualização"
+    if st.button("📥 Forçar Sincronização (Nuvem -> App)", use_container_width=True):
+        carregar_do_sheets_manual()
         st.rerun()
 
-    if st.button("💾 Salvar Alterações na Nuvem", use_container_width=True):
+    st.divider()
+    
+    # 🔒 TRAVA 2: COMPONENTE DE CONFIRMAÇÃO ANTES DE GRAVAR NA NUVEM
+    st.subheader("💾 Salvar Alterações")
+    confirmar_salvamento = st.checkbox("⚠️ Autorizo a gravação e substituição dos dados na nuvem", value=False)
+    
+    if st.button("☁️ Enviar Atualizações para o Sheets", type="primary", use_container_width=True, disabled=not confirmar_salvamento):
         salvar_no_sheets()
         
     st.divider()
-    st.caption("Uso Manual (Plano B):")
-    
+    st.caption("Backup de Segurança (Local):")
     buffer_export = io.BytesIO()
     with pd.ExcelWriter(buffer_export, engine='xlsxwriter') as writer:
         for k in tabelas_padrao.keys():
             st.session_state[f'tab_{k}'].to_excel(writer, sheet_name=k, index=False)
-    
     st.download_button(
         label="Exportar Regras (Excel)",
         data=buffer_export.getvalue(),
@@ -380,18 +403,6 @@ aba_principal, aba_m, aba_p, aba_c, aba_b, aba_i, aba_u, aba_a = st.tabs([
     "🚫 3. Médicos Conveniados", "🛡️ 4. Blindagem de Clínicas", "🔄 5. De-Para de Códigos",
     "📦 6. Unidades de Medida", "🩺 7. Registro ANVISA e Fabricante"
 ])
-
-# Configurações de colunas para travar o comportamento de "número" e virar "texto puro"
-config_texto_colunas = {
-    "Código do Item": st.column_config.TextColumn("Código do Item", help="Insira o código mantendo o zero à esquerda", required=True),
-    "Código Incorreto": st.column_config.TextColumn("Código Incorreto", required=True),
-    "Código Correto": st.column_config.TextColumn("Código Correto", required=True),
-    "Código do Procedimento": st.column_config.TextColumn("Código do Procedimento", required=True),
-    "Código Prestador Protegido": st.column_config.TextColumn("Código Prestador Protegido", required=True),
-    "Unidade de Medida Correta": st.column_config.TextColumn("Unidade de Medida Correta"),
-    "Registro ANVISA": st.column_config.TextColumn("Registro ANVISA"),
-    "Ref. Fabricante": st.column_config.TextColumn("Ref. Fabricante")
-}
 
 with aba_principal:
     st.header("Processamento de Lotes TISS")

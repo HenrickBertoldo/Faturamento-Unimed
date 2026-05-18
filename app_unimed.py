@@ -48,11 +48,12 @@ tabelas_padrao = {
 # FUNÇÕES DE BANCO DE DADOS (GOOGLE SHEETS)
 # ==========================================
 def carregar_do_sheets_silencioso():
-    """Busca os dados na nuvem sem exibir mensagens de sucesso na tela"""
+    """Busca os dados na nuvem forçando a leitura de todas as colunas como texto"""
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         for aba in tabelas_padrao.keys():
-            df = conn.read(worksheet=aba, ttl=0)
+            # O parâmetro dtype=str força a API do Sheets a não remover os zeros à esquerda
+            df = conn.read(worksheet=aba, ttl=0, dtype=str)
             if df is not None and not df.empty:
                 for col in df.columns:
                     df[col] = df[col].astype(str).apply(limpar_numero)
@@ -61,22 +62,22 @@ def carregar_do_sheets_silencioso():
                 if f'tab_{aba}' not in st.session_state:
                     st.session_state[f'tab_{aba}'] = tabelas_padrao[aba]
     except:
-        # Caso falhe a conexão por rede, garante que o app inicie vazio em vez de quebrar
         for aba in tabelas_padrao.keys():
             if f'tab_{aba}' not in st.session_state:
                 st.session_state[f'tab_{aba}'] = tabelas_padrao[aba]
 
 def carregar_do_sheets_manual():
-    """Força o recarregamento manual exibindo alertas na tela"""
+    """Força o recarregamento manual tratando o schema como string pura"""
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         for aba in tabelas_padrao.keys():
-            df = conn.read(worksheet=aba, ttl=0)
+            # O parâmetro dtype=str força a API do Sheets a não remover os zeros à esquerda
+            df = conn.read(worksheet=aba, ttl=0, dtype=str)
             if df is not None and not df.empty:
                 for col in df.columns:
                     df[col] = df[col].astype(str).apply(limpar_numero)
                 st.session_state[f'tab_{aba}'] = df
-        st.success("✅ Todas as regras foram recarregadas da nuvem!")
+        st.success("✅ Todas as regras foram recarregadas da nuvem mantendo a integridade dos códigos!")
     except Exception as e:
         st.error(f"Erro ao conectar com o Google Sheets: {e}")
 
@@ -94,7 +95,6 @@ def salvar_no_sheets():
         st.error(f"Erro ao salvar na nuvem: {e}")
 
 # 🔒 TRAVA 1: CARREGAMENTO AUTOMÁTICO AO ABRIR A PÁGINA
-# Verifica se é a primeira vez que o app roda nesta sessão do navegador
 if "app_inicializado" not in st.session_state:
     with st.spinner("Conectando à nuvem e sincronizando regras de faturamento..."):
         carregar_do_sheets_silencioso()
@@ -355,7 +355,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
 st.title("🛠️ Sistema Integrado Cloud TISS - Unimed Uberlândia")
 st.markdown("Configure as regras operacionais abaixo. Os seus dados ficam salvos dinamicamente na nuvem do aplicativo.")
 
-# Configuração de Colunas de Texto Estrito
+# Configuração de Colunas de Texto Estrito para Edição Visual
 config_texto_colunas = {
     "Código do Item": st.column_config.TextColumn("Código do Item", help="Insira o código mantendo o zero à esquerda", required=True),
     "Código Incorreto": st.column_config.TextColumn("Código Incorreto", required=True),
@@ -370,14 +370,12 @@ config_texto_colunas = {
 with st.sidebar:
     st.header("☁️ Gerenciamento da Nuvem")
     
-    # Botão para baixar vira um recurso opcional de "forçar atualização"
     if st.button("📥 Forçar Sincronização (Nuvem -> App)", use_container_width=True):
         carregar_do_sheets_manual()
         st.rerun()
 
     st.divider()
     
-    # 🔒 TRAVA 2: COMPONENTE DE CONFIRMAÇÃO ANTES DE GRAVAR NA NUVEM
     st.subheader("💾 Salvar Alterações")
     confirmar_salvamento = st.checkbox("⚠️ Autorizo a gravação e substituição dos dados na nuvem", value=False)
     

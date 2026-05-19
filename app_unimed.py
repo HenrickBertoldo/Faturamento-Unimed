@@ -3,6 +3,7 @@ import streamlit as st
 import xml.etree.ElementTree as ET
 import pandas as pd
 import io
+import streamlit.components.v1 as components
 from datetime import datetime, timedelta
 from streamlit_gsheets import GSheetsConnection
 
@@ -43,7 +44,7 @@ tabelas_padrao = {
 # FUNÇÕES DE BANCO DE DADOS E FORMATAÇÃO
 # ==========================================
 def formatar_tabela_padrao(df):
-    """QoL 4: Força caixa alta e remove espaços em branco extras"""
+    """Força caixa alta e remove espaços em branco extras"""
     for col in df.columns:
         df[col] = df[col].astype(str).str.strip().str.upper()
         df[col] = df[col].replace(['NAN', 'NONE', '<NA>'], '')
@@ -82,7 +83,7 @@ if "app_inicializado" not in st.session_state:
     st.session_state["app_inicializado"] = True
 
 # ==========================================
-# MOTOR DE CORREÇÃO DO XML 
+# MOTOR DE CORREÇÃO DO XML
 # ==========================================
 def calcular_tempo_oxigenio(hora_ini_str, qtd_executada, tipo_unidade):
     try:
@@ -287,9 +288,53 @@ with col2:
         )
 
         st.divider()
-        st.markdown("📄 **Visualização do XML**")
-        # O código volta a aparecer na tela para você copiar
-        st.code(st.session_state['xml_processado'].decode('ISO-8859-1'), language='xml')
+        st.markdown("📄 **Código Fonte XML**")
+        
+        # Prepara a string do XML tratando escapes do JavaScript de forma segura
+        xml_str = st.session_state['xml_processado'].decode('ISO-8859-1')
+        texto_escaped = xml_str.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
+        
+        # Botão Inteligente de Cópia Rápida (Fica ativo mesmo com a barra minimizada)
+        html_copiar = f"""
+        <button id="cpBtn" style="
+            width: 100%; 
+            background-color: #f0f2f6; 
+            color: #31333f; 
+            border: 1px solid rgba(49, 51, 63, 0.2); 
+            padding: 10px; 
+            border-radius: 6px; 
+            cursor: pointer; 
+            font-size: 14px; 
+            font-weight: 500;
+            margin-bottom: 8px;
+            font-family: inherit;
+        ">📋 Copiar Todo o Código XML (Barra Minimizada)</button>
+        
+        <script>
+        document.getElementById("cpBtn").addEventListener("click", () => {{
+            navigator.clipboard.writeText(`{texto_escaped}`).then(() => {{
+                let b = document.getElementById("cpBtn");
+                b.innerText = "✅ Código Copiado com Sucesso!";
+                b.style.backgroundColor = "#d4edda";
+                b.style.color = "#155724";
+                b.style.borderColor = "#c3e6cb";
+                setTimeout(() => {{ 
+                    b.innerText = "📋 Copiar Todo o Código XML (Barra Minimizada)"; 
+                    b.style.backgroundColor = "#f0f2f6"; 
+                    b.style.color = "#31333f";
+                    b.style.borderColor = "rgba(49, 51, 63, 0.2)";
+                }}, 2000);
+            }}).catch(() => {{ 
+                alert("Permissão negada pelo navegador. Abra a barra expandida abaixo para copiar manualmente."); 
+            }});
+        }});
+        </script>
+        """
+        components.html(html_copiar, height=52)
+        
+        # Barra Minimizada (Oculta por padrão para manter o visual limpo)
+        with st.expander("🔍 Abrir Visualização Completa do XML", expanded=False):
+            st.code(xml_str, language='xml')
 
 st.divider()
 st.markdown("### 🛠️ Regras de Negócio e Parametrização")

@@ -12,7 +12,7 @@ from streamlit_gsheets import GSheetsConnection
 # ==========================================
 st.set_page_config(page_title="TISS Cloud", layout="wide", page_icon="☁️")
 
-# CSS apenas para esconder o menu padrão do Streamlit (deixa com cara de software profissional)
+# CSS para ocultar menus padrões do Streamlit e polir a interface
 st.markdown("""
     <style>
     #MainMenu {visibility: hidden;}
@@ -209,7 +209,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
     return xml_bytes, auditoria
 
 # ==========================================
-# INTERFACE GRÁFICA - LAYOUT CORRIGIDO
+# INTERFACE GRÁFICA - LAYOUT PREMIUM AJUSTADO
 # ==========================================
 st.title("☁️ Sistema Integrado TISS | UNIMED")
 st.caption("Automação, correção e validação de faturamento XML em nuvem.")
@@ -301,27 +301,29 @@ with col2:
             xml_str = st.session_state['xml_processado'].decode('ISO-8859-1')
             texto_escaped = xml_str.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
             
-            # Botão de cópia ajustado para funcionar bem tanto no tema claro quanto escuro (Fundo transparente)
+            # --- AJUSTE: Botão com fundo branco sólido e alto contraste para Dark Mode ---
             html_copiar = f"""
             <button id="cpBtn" style="
-                width: 100%; background-color: transparent; color: inherit; 
-                border: 1px solid rgba(128, 128, 128, 0.5); padding: 10px; border-radius: 6px; 
-                cursor: pointer; font-size: 14px; font-weight: 500;
-                transition: 0.2s; color: var(--text-color);
-            " onmouseover="this.style.backgroundColor='rgba(128, 128, 128, 0.1)'" onmouseout="this.style.backgroundColor='transparent'">
+                width: 100%; background-color: #FFFFFF; color: #1E1E1E; 
+                border: 1px solid #CCCCCC; padding: 10px; border-radius: 6px; 
+                cursor: pointer; font-size: 14px; font-weight: 600;
+                transition: 0.2s; box-shadow: 0px 2px 4px rgba(0,0,0,0.1);
+            " onmouseover="this.style.backgroundColor='#F5F5F5'" onmouseout="this.style.backgroundColor='#FFFFFF'">
             📋 Copiar Código-Fonte para a Área de Transferência
             </button>
             <script>
             document.getElementById("cpBtn").addEventListener("click", () => {{
                 navigator.clipboard.writeText(`{texto_escaped}`).then(() => {{
                     let b = document.getElementById("cpBtn");
-                    b.innerText = "✅ Copiado com Sucesso!";
-                    b.style.backgroundColor = "rgba(46, 204, 113, 0.2)";
-                    b.style.borderColor = "rgba(46, 204, 113, 0.5)";
+                    b.innerText = "✅ Código-Fonte Copiado!";
+                    b.style.backgroundColor = "#D4EDDA";
+                    b.style.color = "#155724";
+                    b.style.borderColor = "#C3E6CB";
                     setTimeout(() => {{ 
                         b.innerText = "📋 Copiar Código-Fonte para a Área de Transferência"; 
-                        b.style.backgroundColor = "WHITE";
-                        b.style.borderColor = "rgba(128, 128, 128, 0.5)";
+                        b.style.backgroundColor = "#FFFFFF";
+                        b.style.color = "#1E1E1E";
+                        b.style.borderColor = "#CCCCCC";
                     }}, 3000);
                 }});
             }});
@@ -337,7 +339,7 @@ with col2:
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# --- BASE DE DADOS ---
+# --- BASE DE DADOS (AJUSTADO: Sem distorções de tamanho vertical) ---
 with st.container(border=True):
     st.markdown("### 🛠️ Parametrização e Regras de Negócio")
     abas = st.tabs(["👩‍⚕️ Médicos e CBO", "⚙️ Procedimentos", "🛡️ Blindagem", "💊 Itens e Meds", "📦 Unidades", "🏥 Registro ANVISA"])
@@ -349,6 +351,6 @@ with st.container(border=True):
                 st.session_state[f'tab_{aba_nome}'], 
                 num_rows="dynamic", 
                 use_container_width=True, 
-                column_config=config_texto_colunas,
-                height=350
+                column_config=config_texto_colunas
+                # height removido: agora expande e encolhe dinamicamente conforme os dados reais!
             )

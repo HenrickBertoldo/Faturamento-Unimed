@@ -91,7 +91,7 @@ if "app_inicializado" not in st.session_state:
     st.session_state["app_inicializado"] = True
 
 # ==========================================
-# MOTOR DE CORREÇÃO DO XML
+# MOTOR DE CORREÇÃO DO XML (LOGICA COMPLETA ATIVADA)
 # ==========================================
 def calcular_tempo_oxigenio(hora_ini_str, qtd_executada, tipo_unidade):
     try:
@@ -127,37 +127,108 @@ def padronizar_codigo_8_digitos(cod):
     return "0" + c if len(c) == 7 and c.isdigit() else c
 
 def processar_xml_tiss(arquivo_xml, dfs):
-    auditoria = { 'cbos': 0, 'itens': 0, 'anvisa': 0, 'unidades': 0, 'oxigenio': 0 }
+    auditoria = { 
+        'cbos': 0, 'itens': 0, 'anvisa': 0, 'unidades': 0, 'oxigenio': 0,
+        'conveniados_excluidos': 0, 'procedimentos_ajustados': 0, 'guias_blindadas': 0 
+    }
     tree = ET.parse(arquivo_xml)
     root = tree.getroot()
     
+    # Preparação dos dicionários de regras
     dict_medicos = {str(r['Nome do Médico']).strip().upper(): r for _, r in dfs['medicos'].iterrows()}
+    set_conveniados = set(dfs['conveniados']['Nome do Médico Conveniado'].str.strip().str.upper().dropna())
+    set_blindagem = set(dfs['blindagem']['Código Prestador Protegido'].apply(limpar_numero).dropna())
     dict_itens = {padronizar_codigo_8_digitos(k): padronizar_codigo_8_digitos(v) for k, v in zip(dfs['itens']['Código Incorreto'], dfs['itens']['Código Correto']) if pd.notna(k)}
     dict_unidades = {padronizar_codigo_8_digitos(r['Código do Item']): limpar_numero(r['Unidade de Medida Correta']) for _, r in dfs['unidades'].iterrows() if pd.notna(r['Código do Item'])}
     dict_anvisa = {padronizar_codigo_8_digitos(r['Código do Item']): r for _, r in dfs['anvisa'].iterrows() if pd.notna(r['Código do Item'])}
+    dict_procedimentos = {padronizar_codigo_8_digitos(r['Código do Procedimento']): r for _, r in dfs['procedimentos'].iterrows() if pd.notna(r['Código do Procedimento'])}
 
     for guia in root.findall('.//ans:guiaResumoInternacao', NS):
+        
+        # --- REGRA DE BLINDAGEM ---
+        prestador_elem = guia.find('.//ans:dadosPrestador/ans:codigoPrestadorNaOperadora', NS) or guia.find('.//ans:dadosContratado/ans:codigoPrestadorNaOperadora', NS)
+        if prestador_elem is not None and limpar_numero(prestador_elem.text) in set_blindagem:
+            auditoria['guias_blindadas'] += 1
+            continue  # Pula o processamento desta guia completamente
+            
         procs_container = guia.find('.//ans:procedimentosExecutados', NS)
         if procs_container is not None:
             for proc_exec in procs_container.findall('ans:procedimentoExecutado', NS):
+                
+                # --- REGRA DE PROCEDIMENTOS (VIA, TÉCNICA, GRAU PARTICIPAÇÃO) ---
+                cod_proc_elem = proc_exec.find('ans:codigoProcedimento', NS)
+                if cod_proc_elem is not None:
+                    cod_p = padronizar_codigo_8_digitos(cod_proc_elem.text)
+                    if cod_p in dict_procedimentos:
+                        regra_p = dict_procedimentos[cod_p]
+                        ajustou_p = False
+                        
+                        # Grau de Participação
+                        grau_val = limpar_numero(regra_p.get('Grau Part Obrigatório', ''))
+                        if grau_val:
+                            grau_elem = proc_exec.find('ans:grauParticipacao', NS)
+                            if grau_elem is not None: grau_elem.text = grau_val
+                            else:
+                                grau_elem = ET.Element(ans_tag('grauParticipacao'))
+                                grau_elem.text = grau_val
+                                proc_exec.append(grau_elem)
+                            ajustou_p = True
+                            
+                        # Via de Acesso
+                        via_val = str(regra_p.get('Via de Acesso (1, 2 ou EXCLUIR)', '')).strip().upper()
+                        via_elem = proc_exec.find('ans:viaAcesso', NS)
+                        if via_val == 'EXCLUIR' and via_elem is not None:
+                            proc_exec.remove(via_elem)
+                            ajustou_p = True
+                        elif via_val in ['1', '2']:
+                            if via_elem is not None: via_elem.text = via_val
+                            else:
+                                via_elem = ET.Element(ans_tag('viaAcesso'))
+                                via_elem.text = via_val
+                                proc_exec.append(via_elem)
+                            ajustou_p = True
+                            
+                        # Técnica
+                        tec_val = str(regra_p.get('Técnica (1, 2 ou EXCLUIR)', '')).strip().upper()
+                        tec_elem = proc_exec.find('ans:tecnica', NS)
+                        if tec_val == 'EXCLUIR' and tec_elem is not None:
+                            proc_exec.remove(tec_elem)
+                            ajustou_p = True
+                        elif tec_val in ['1', '2']:
+                            if tec_elem is not None: tec_elem.text = tec_val
+                            else:
+                                tec_elem = ET.Element(ans_tag('tecnica'))
+                                tec_elem.text = tec_val
+                                proc_exec.append(tec_elem)
+                            ajustou_p = True
+                            
+                        if ajustou_p: auditoria['procedimentos_ajustados'] += 1
+
+                # --- REGRA DE MÉDICOS (CBO, CPF E EXCLUSÃO DE CONVENIADOS) ---
                 equipes = proc_exec.findall('ans:identEquipe', NS)
                 for eq in equipes:
                     ident_eq = eq.find('ans:identificacaoEquipe', NS)
                     if ident_eq is None: continue
                     nome_prof_elem = ident_eq.find('ans:nomeProf', NS)
                     nome_prof = nome_prof_elem.text.strip().upper() if nome_prof_elem is not None and nome_prof_elem.text else ""
+                    
+                    # Se o médico for CONVENIADO, deleta o bloco de equipe dele
+                    if nome_prof in set_conveniados:
+                        proc_exec.remove(eq)
+                        auditoria['conveniados_excluidos'] += 1
+                        continue  # Vai para a próxima equipe
+                    
                     cbo_elem = ident_eq.find('ans:CBOS', NS)
-
                     if nome_prof in dict_medicos:
                         regra_m = dict_medicos[nome_prof]
                         
-                        # 1. Correção de CBO
+                        # Correção de CBO
                         cbo_novo = limpar_numero(regra_m['CBO Correto'])
                         if cbo_elem is not None and cbo_novo != '':
                             cbo_elem.text = cbo_novo
                             auditoria['cbos'] += 1
                         
-                        # 2. Correção de CPF -> Código do Prestador da Operadora
+                        # Correção de CPF -> Código do Prestador da Operadora
                         substituir = str(regra_m.get('Substituir por Cód. Operadora', '')).strip().upper() == 'SIM'
                         cod_operadora = limpar_numero(regra_m.get('Código na Operadora', ''))
                         
@@ -167,7 +238,6 @@ def processar_xml_tiss(arquivo_xml, dfs):
                                 cpf_elem = cod_prof_elem.find('ans:cpfContratado', NS)
                                 cod_op_elem = cod_prof_elem.find('ans:codigoPrestadorNaOperadora', NS)
                                 
-                                # Se estiver mapeado como CPF, transforma a tag para Código do Prestador
                                 if cpf_elem is not None:
                                     cpf_elem.tag = ans_tag('codigoPrestadorNaOperadora')
                                     cpf_elem.text = cod_operadora
@@ -245,7 +315,7 @@ config_texto_colunas = {
     "Ref. Fabricante": st.column_config.TextColumn("Ref. Fab.")
 }
 
-# --- CENTRAL DE SINCRONIZAÇÃO (NOVO PAINEL 100% VISÍVEL NO TOPO) ---
+# --- CENTRAL DE SINCRONIZAÇÃO NO TOPO ---
 with st.container(border=True):
     st.markdown("### 🔄 Central de Sincronização e Controle de Dados")
     c_sync1, c_sync2, c_sync3 = st.columns([1, 1.2, 1.3], gap="medium")
@@ -307,9 +377,14 @@ with col2:
             c2.metric("🔄 Itens Traduzidos", aud['itens'])
             c3.metric("🩺 Itens ANVISA", aud['anvisa'])
             
-            c4, c5, _ = st.columns(3)
+            c4, c5, c6 = st.columns(3)
             c4.metric("📦 Unid. Medida", aud['unidades'])
             c5.metric("⏱️ Tempos O²", aud['oxigenio'])
+            c6.metric("🤝 Conveniados Removidos", aud['conveniados_excluidos'])
+
+            c7, c8, _ = st.columns(3)
+            c7.metric("⚙️ Procs. Ajustados", aud['procedimentos_ajustados'])
+            c8.metric("🛡️ Guia(s) Blindada(s)", aud['guias_blindadas'])
             
             st.divider()
             

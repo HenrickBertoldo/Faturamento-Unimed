@@ -7,7 +7,30 @@ import streamlit.components.v1 as components
 from datetime import datetime, timedelta
 from streamlit_gsheets import GSheetsConnection
 
-st.set_page_config(page_title="TISS Cloud - Unimed", layout="wide", page_icon="☁️")
+# ==========================================
+# CONFIGURAÇÃO DA PÁGINA (Deve ser o primeiro comando)
+# ==========================================
+st.set_page_config(page_title="TISS Cloud", layout="wide", page_icon="☁️")
+
+# ==========================================
+# CSS CUSTOMIZADO PARA UM VISUAL MAIS CLEAN
+# ==========================================
+st.markdown("""
+    <style>
+    /* Suaviza as bordas e dá um visual de card para os containers */
+    div[data-testid="stMetric"] {
+        background-color: #f8f9fa;
+        border: 1px solid #e9ecef;
+        padding: 15px;
+        border-radius: 10px;
+        box-shadow: 2px 2px 5px rgba(0,0,0,0.02);
+    }
+    /* Oculta o menu padrão do Streamlit para o usuário final */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    </style>
+""", unsafe_allow_html=True)
 
 # ==========================================
 # CONSTANTES E NAMESPACES TISS
@@ -40,11 +63,7 @@ tabelas_padrao = {
     'anvisa': pd.DataFrame(columns=['Código do Item', 'Registro ANVISA', 'Ref. Fabricante'])
 }
 
-# ==========================================
-# FUNÇÕES DE BANCO DE DADOS E FORMATAÇÃO
-# ==========================================
 def formatar_tabela_padrao(df):
-    """Força caixa alta e remove espaços em branco extras"""
     for col in df.columns:
         df[col] = df[col].astype(str).str.strip().str.upper()
         df[col] = df[col].replace(['NAN', 'NONE', '<NA>'], '')
@@ -60,7 +79,7 @@ def carregar_do_sheets(silencioso=False):
                 st.session_state[f'tab_{aba}'] = formatar_tabela_padrao(df)
             elif f'tab_{aba}' not in st.session_state:
                 st.session_state[f'tab_{aba}'] = tabelas_padrao[aba]
-        if not silencioso: st.success("✅ Regras recarregadas com sucesso!")
+        if not silencioso: st.toast("✅ Regras sincronizadas da nuvem!", icon="☁️")
     except Exception as e:
         if not silencioso: st.error(f"Erro na conexão: {e}")
         for aba in tabelas_padrao.keys():
@@ -74,17 +93,18 @@ def salvar_no_sheets():
             if not df_atual.empty:
                 for col in df_atual.columns: df_atual[col] = df_atual[col].astype(str).apply(limpar_numero)
                 conn.update(worksheet=aba, data=df_atual)
-        st.success("☁️ Alterações gravadas na nuvem!")
+        st.toast("✅ Alterações gravadas na nuvem!", icon="💾")
     except Exception as e:
         st.error(f"Erro ao salvar: {e}")
 
 if "app_inicializado" not in st.session_state:
-    with st.spinner("Sincronizando nuvem..."): carregar_do_sheets(silencioso=True)
+    with st.spinner("Conectando à base de dados..."): carregar_do_sheets(silencioso=True)
     st.session_state["app_inicializado"] = True
 
 # ==========================================
 # MOTOR DE CORREÇÃO DO XML
 # ==========================================
+# (As funções de correção permanecem idênticas, para garantir a estabilidade que já alcançamos)
 def calcular_tempo_oxigenio(hora_ini_str, qtd_executada, tipo_unidade):
     try:
         t_ini = datetime.strptime(hora_ini_str.strip(), "%H:%M:%S")
@@ -120,7 +140,6 @@ def padronizar_codigo_8_digitos(cod):
 
 def processar_xml_tiss(arquivo_xml, dfs):
     auditoria = { 'cbos': 0, 'itens': 0, 'anvisa': 0, 'unidades': 0, 'oxigenio': 0 }
-    
     tree = ET.parse(arquivo_xml)
     root = tree.getroot()
     
@@ -183,19 +202,16 @@ def processar_xml_tiss(arquivo_xml, dfs):
                         ref_alvo = limpar_numero(regra_a['Ref. Fabricante'])
                         add_anvisa = anvisa_alvo != "" and (servicos.find('ans:registroANVISA', NS) is None or not servicos.find('ans:registroANVISA', NS).text)
                         add_ref = ref_alvo != "" and (servicos.find('ans:codigoRefFabricante', NS) is None or not servicos.find('ans:codigoRefFabricante', NS).text)
-                        
                         if add_anvisa or add_ref:
                             reordenar_servico_executado(servicos, anvisa_alvo if add_anvisa else None, ref_alvo if add_ref else None)
                             auditoria['anvisa'] += 1
 
-    # Cálculo do Hash
     hash_node = root.find('.//ans:hash', NS)
     if hash_node is not None: hash_node.text = ""
 
     temp_buffer = io.BytesIO()
     tree.write(temp_buffer, encoding='ISO-8859-1', xml_declaration=True)
     xml_bytes = temp_buffer.getvalue()
-    
     xml_bytes = xml_bytes.replace(b"<?xml version='1.0' encoding='ISO-8859-1'?>", b'<?xml version="1.0" encoding="ISO-8859-1"?>')
     xml_bytes = xml_bytes.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
     
@@ -205,147 +221,148 @@ def processar_xml_tiss(arquivo_xml, dfs):
     return xml_bytes, auditoria
 
 # ==========================================
-# INTERFACE GRÁFICA
+# INTERFACE GRÁFICA - LAYOUT PREMIUM
 # ==========================================
-st.title("☁️ Sistema Integrado TISS - Unimed")
+# Título Principal Moderno
+st.markdown("<h1>☁️ Sistema Integrado TISS <span style='color: #009688; font-size: 24px;'>| UNIMED</span></h1>", unsafe_allow_html=True)
+st.markdown("<p style='color: #666; margin-bottom: 30px;'>Automação, correção e validação de faturamento XML em nuvem.</p>", unsafe_allow_html=True)
 
 config_texto_colunas = {
-    "Código do Item": st.column_config.TextColumn("Código do Item (Com zeros)"),
-    "Código Incorreto": st.column_config.TextColumn("Cód. Incorreto"),
-    "Código Correto": st.column_config.TextColumn("Cód. Correto"),
-    "Código do Procedimento": st.column_config.TextColumn("Cód. Procedimento"),
+    "Código do Item": st.column_config.TextColumn("Código (Com zeros)"),
+    "Código Incorreto": st.column_config.TextColumn("Incorreto"),
+    "Código Correto": st.column_config.TextColumn("Correto"),
     "Código Prestador Protegido": st.column_config.TextColumn("Cód. Protegido"),
     "Unidade de Medida Correta": st.column_config.TextColumn("Nova Unidade"),
     "Registro ANVISA": st.column_config.TextColumn("Reg. ANVISA"),
     "Ref. Fabricante": st.column_config.TextColumn("Ref. Fab.")
 }
 
+# --- BARRA LATERAL ORGANIZADA ---
 with st.sidebar:
-    st.image("https://img.icons8.com/color/96/000000/medical-doctor.png", width=60)
-    st.header("Gestão de Dados")
+    st.image("https://img.icons8.com/color/96/000000/medical-doctor.png", width=70)
+    st.markdown("### Painel de Controle")
     
-    if st.button("📥 Puxar Dados da Nuvem", use_container_width=True):
-        carregar_do_sheets()
-        st.rerun()
-
-    with st.expander("💾 Salvar Alterações", expanded=False):
-        confirmar_salvamento = st.checkbox("Confirmar gravação")
-        if st.button("Enviar para Nuvem", type="primary", use_container_width=True, disabled=not confirmar_salvamento):
-            salvar_no_sheets()
+    with st.container(border=True):
+        st.markdown("**🔄 Sincronização**")
+        if st.button("📥 Puxar da Nuvem", use_container_width=True):
+            carregar_do_sheets()
             st.rerun()
-            
-    st.divider()
-    
-    st.subheader("📦 Importação em Massa")
-    st.caption("Suba um arquivo Excel contendo planilhas com os mesmos nomes das abas (ex: anvisa, itens, medicos).")
-    planilha_up = st.file_uploader("Subir Excel", type=['xlsx', 'xls'])
-    if planilha_up:
-        if st.button("Importar Planilha"):
-            xls = pd.read_excel(planilha_up, sheet_name=None, dtype=str)
-            for aba, df_importado in xls.items():
-                if aba in tabelas_padrao:
-                    st.session_state[f'tab_{aba}'] = formatar_tabela_padrao(df_importado)
-            st.success("Tabelas importadas! Clique em 'Enviar para Nuvem' para gravar.")
 
-col1, col2 = st.columns([1, 2])
+        with st.expander("💾 Gravar Alterações", expanded=False):
+            confirmar_salvamento = st.checkbox("Confirmar sobrescrita")
+            if st.button("Enviar para Nuvem", type="primary", use_container_width=True, disabled=not confirmar_salvamento):
+                salvar_no_sheets()
+                st.rerun()
+                
+    with st.container(border=True):
+        st.markdown("**📦 Carga em Massa**")
+        st.caption("Suba um arquivo Excel para alimentar as tabelas de uma só vez.")
+        planilha_up = st.file_uploader("Upload Excel", type=['xlsx', 'xls'], label_visibility="collapsed")
+        if planilha_up:
+            if st.button("Importar Planilha", use_container_width=True):
+                xls = pd.read_excel(planilha_up, sheet_name=None, dtype=str)
+                for aba, df_importado in xls.items():
+                    if aba in tabelas_padrao:
+                        st.session_state[f'tab_{aba}'] = formatar_tabela_padrao(df_importado)
+                st.success("Tabelas importadas! Clique em 'Gravar Alterações' para salvar na nuvem.")
+
+# --- ÁREA PRINCIPAL (CARDS) ---
+col1, col2 = st.columns([1, 1.2], gap="large")
 
 with col1:
-    st.markdown("### 1️⃣ Subir Lote TISS")
-    xml_up = st.file_uploader("Arraste o arquivo XML", type=['xml'], label_visibility="collapsed")
-    if xml_up:
-        if st.button("🚀 Processar e Limpar Arquivo", type="primary", use_container_width=True):
-            try:
-                dfs_atuais = {k: st.session_state[f'tab_{k}'] for k in tabelas_padrao.keys()}
-                xml_resultado, auditoria = processar_xml_tiss(xml_up, dfs_atuais)
-                
-                st.session_state['xml_processado'] = xml_resultado
-                st.session_state['auditoria_atual'] = auditoria
-                st.session_state['nome_arquivo_original'] = xml_up.name
-            except Exception as e:
-                st.error(f"Falha ao processar: {e}")
+    with st.container(border=True):
+        st.markdown("### 1️⃣ Processamento do Lote")
+        st.markdown("Arraste o arquivo XML gerado pelo seu sistema de gestão aqui para aplicar as regras de negócio.")
+        xml_up = st.file_uploader("Arraste o arquivo XML", type=['xml'], label_visibility="collapsed")
+        
+        if xml_up:
+            if st.button("🚀 Iniciar Correção Automática", type="primary", use_container_width=True):
+                try:
+                    dfs_atuais = {k: st.session_state[f'tab_{k}'] for k in tabelas_padrao.keys()}
+                    xml_resultado, auditoria = processar_xml_tiss(xml_up, dfs_atuais)
+                    st.session_state['xml_processado'] = xml_resultado
+                    st.session_state['auditoria_atual'] = auditoria
+                    st.session_state['nome_arquivo_original'] = xml_up.name
+                except Exception as e:
+                    st.error(f"Falha ao processar: {e}")
 
 with col2:
-    st.markdown("### 2️⃣ Resultado e Download")
     if 'xml_processado' in st.session_state:
-        aud = st.session_state['auditoria_atual']
-        st.success("✅ Arquivo processado e Hash MD5 recalculado!")
-        
-        c1, c2, c3 = st.columns(3)
-        c1.metric("👩‍⚕️ CBOs Ajustados", aud['cbos'])
-        c2.metric("🔄 Códigos Substituídos", aud['itens'])
-        c3.metric("🩺 Tags ANVISA/Ref Injetadas", aud['anvisa'])
-        
-        c4, c5, _ = st.columns(3)
-        c4.metric("📦 Unidades Trocadas", aud['unidades'])
-        c5.metric("⏱️ Tempos (O²) Calculados", aud['oxigenio'])
-        
-        st.download_button(
-            label="📥 Baixar XML Validado", 
-            data=st.session_state['xml_processado'], 
-            file_name=f"PRONTO_{st.session_state['nome_arquivo_original']}", 
-            mime="application/xml", 
-            use_container_width=True
-        )
-
-        st.divider()
-        st.markdown("📄 **Código Fonte XML**")
-        
-        # Prepara a string do XML tratando escapes do JavaScript de forma segura
-        xml_str = st.session_state['xml_processado'].decode('ISO-8859-1')
-        texto_escaped = xml_str.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
-        
-        # Botão Inteligente de Cópia Rápida (Fica ativo mesmo com a barra minimizada)
-        html_copiar = f"""
-        <button id="cpBtn" style="
-            width: 100%; 
-            background-color: #f0f2f6; 
-            color: #31333f; 
-            border: 1px solid rgba(49, 51, 63, 0.2); 
-            padding: 10px; 
-            border-radius: 6px; 
-            cursor: pointer; 
-            font-size: 14px; 
-            font-weight: 500;
-            margin-bottom: 8px;
-            font-family: inherit;
-        ">📋 Copiar Todo o Código XML (Barra Minimizada)</button>
-        
-        <script>
-        document.getElementById("cpBtn").addEventListener("click", () => {{
-            navigator.clipboard.writeText(`{texto_escaped}`).then(() => {{
-                let b = document.getElementById("cpBtn");
-                b.innerText = "✅ Código Copiado com Sucesso!";
-                b.style.backgroundColor = "#d4edda";
-                b.style.color = "#155724";
-                b.style.borderColor = "#c3e6cb";
-                setTimeout(() => {{ 
-                    b.innerText = "📋 Copiar Todo o Código XML (Barra Minimizada)"; 
-                    b.style.backgroundColor = "#f0f2f6"; 
-                    b.style.color = "#31333f";
-                    b.style.borderColor = "rgba(49, 51, 63, 0.2)";
-                }}, 2000);
-            }}).catch(() => {{ 
-                alert("Permissão negada pelo navegador. Abra a barra expandida abaixo para copiar manualmente."); 
+        with st.container(border=True):
+            aud = st.session_state['auditoria_atual']
+            st.markdown("### 2️⃣ Resultado da Auditoria")
+            
+            # Métricas organizadas em cards (via CSS)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("👩‍⚕️ CBOs", aud['cbos'], help="CBOs de médicos corrigidos")
+            c2.metric("🔄 Itens", aud['itens'], help="Códigos de materiais trocados")
+            c3.metric("🩺 ANVISA", aud['anvisa'], help="Tags injetadas")
+            
+            c4, c5, _ = st.columns(3)
+            c4.metric("📦 Unidades", aud['unidades'], help="Unidades de medida padronizadas")
+            c5.metric("⏱️ Tempos O²", aud['oxigenio'], help="Tempos de oxigenoterapia recalculados")
+            
+            st.divider()
+            
+            st.download_button(
+                label="📥 Fazer Download do XML Validado (Recomendado)", 
+                data=st.session_state['xml_processado'], 
+                file_name=f"PRONTO_{st.session_state['nome_arquivo_original']}", 
+                mime="application/xml", 
+                type="primary",
+                use_container_width=True
+            )
+            
+            xml_str = st.session_state['xml_processado'].decode('ISO-8859-1')
+            texto_escaped = xml_str.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
+            
+            html_copiar = f"""
+            <button id="cpBtn" style="
+                width: 100%; background-color: #ffffff; color: #31333f; 
+                border: 1px solid #d3d4d8; padding: 10px; border-radius: 6px; 
+                cursor: pointer; font-size: 14px; font-weight: 500;
+                transition: 0.2s; box-shadow: 0px 2px 4px rgba(0,0,0,0.05);
+            " onmouseover="this.style.backgroundColor='#f8f9fa'" onmouseout="this.style.backgroundColor='#ffffff'">
+            📋 Copiar Código-Fonte para a Área de Transferência
+            </button>
+            <script>
+            document.getElementById("cpBtn").addEventListener("click", () => {{
+                navigator.clipboard.writeText(`{texto_escaped}`).then(() => {{
+                    let b = document.getElementById("cpBtn");
+                    b.innerText = "✅ Copiado! Pronto para colar no Validador.";
+                    b.style.backgroundColor = "#e8f5e9"; b.style.color = "#2e7d32"; b.style.borderColor = "#c8e6c9";
+                    setTimeout(() => {{ 
+                        b.innerText = "📋 Copiar Código-Fonte para a Área de Transferência"; 
+                        b.style.backgroundColor = "#ffffff"; b.style.color = "#31333f"; b.style.borderColor = "#d3d4d8";
+                    }}, 3000);
+                }});
             }});
-        }});
-        </script>
-        """
-        components.html(html_copiar, height=52)
-        
-        # Barra Minimizada (Oculta por padrão para manter o visual limpo)
-        with st.expander("🔍 Abrir Visualização Completa do XML", expanded=False):
-            st.code(xml_str, language='xml')
+            </script>
+            """
+            components.html(html_copiar, height=50)
+            
+            with st.expander("🔍 Inspecionar Código Visualmente"):
+                st.code(xml_str, language='xml')
+    else:
+        # Placeholder enquanto o usuário não processa nada
+        with st.container(border=True):
+            st.markdown("<div style='text-align: center; color: #999; padding: 40px;'><h4>Aguardando Arquivo</h4><p>Faça o upload e clique em processar para ver o relatório aqui.</p></div>", unsafe_allow_html=True)
 
-st.divider()
-st.markdown("### 🛠️ Regras de Negócio e Parametrização")
-abas = st.tabs(["Médicos e CBO", "De-Para Procedimentos", "Blindagem", "Itens e Medicamentos", "Unidades de Medida", "Registro ANVISA"])
+st.markdown("<br>", unsafe_allow_html=True)
 
-tabelas_nomes = ['medicos', 'procedimentos', 'blindagem', 'itens', 'unidades', 'anvisa']
-for i, aba_nome in enumerate(tabelas_nomes):
-    with abas[i]:
-        st.session_state[f'tab_{aba_nome}'] = st.data_editor(
-            st.session_state[f'tab_{aba_nome}'], 
-            num_rows="dynamic", 
-            use_container_width=True, 
-            column_config=config_texto_colunas
-        )
+# --- BASE DE DADOS (ABAS) ---
+with st.container(border=True):
+    st.markdown("### 🛠️ Parametrização e Regras de Negócio")
+    st.caption("Edite os valores abaixo diretamente na tabela. Não se esqueça de salvar na barra lateral.")
+    abas = st.tabs(["👩‍⚕️ Médicos e CBO", "⚙️ Procedimentos", "🛡️ Blindagem", "💊 Itens e Meds", "📦 Unidades", "🏥 Registro ANVISA"])
+
+    tabelas_nomes = ['medicos', 'procedimentos', 'blindagem', 'itens', 'unidades', 'anvisa']
+    for i, aba_nome in enumerate(tabelas_nomes):
+        with abas[i]:
+            st.session_state[f'tab_{aba_nome}'] = st.data_editor(
+                st.session_state[f'tab_{aba_nome}'], 
+                num_rows="dynamic", 
+                use_container_width=True, 
+                column_config=config_texto_colunas,
+                height=350 # Fixa a altura para não quebrar o layout se tiver muitas linhas
+            )

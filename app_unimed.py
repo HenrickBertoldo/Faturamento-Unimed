@@ -46,7 +46,6 @@ def formatar_tabela_padrao(df):
     """QoL 4: Força caixa alta e remove espaços em branco extras"""
     for col in df.columns:
         df[col] = df[col].astype(str).str.strip().str.upper()
-        # Restaura os valores vazios reais para não ficar com a string 'NAN'
         df[col] = df[col].replace(['NAN', 'NONE', '<NA>'], '')
     return df
 
@@ -70,7 +69,6 @@ def salvar_no_sheets():
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         for aba in tabelas_padrao.keys():
-            # Força a formatação visual antes de salvar na nuvem (QoL 4)
             df_atual = formatar_tabela_padrao(st.session_state[f'tab_{aba}'].copy())
             if not df_atual.empty:
                 for col in df_atual.columns: df_atual[col] = df_atual[col].astype(str).apply(limpar_numero)
@@ -84,7 +82,7 @@ if "app_inicializado" not in st.session_state:
     st.session_state["app_inicializado"] = True
 
 # ==========================================
-# MOTOR DE CORREÇÃO DO XML (COM AUDITORIA)
+# MOTOR DE CORREÇÃO DO XML 
 # ==========================================
 def calcular_tempo_oxigenio(hora_ini_str, qtd_executada, tipo_unidade):
     try:
@@ -120,7 +118,6 @@ def padronizar_codigo_8_digitos(cod):
     return "0" + c if len(c) == 7 and c.isdigit() else c
 
 def processar_xml_tiss(arquivo_xml, dfs):
-    # QoL 2: Variáveis de Auditoria
     auditoria = { 'cbos': 0, 'itens': 0, 'anvisa': 0, 'unidades': 0, 'oxigenio': 0 }
     
     tree = ET.parse(arquivo_xml)
@@ -198,7 +195,6 @@ def processar_xml_tiss(arquivo_xml, dfs):
     tree.write(temp_buffer, encoding='ISO-8859-1', xml_declaration=True)
     xml_bytes = temp_buffer.getvalue()
     
-    # Ajuste preciso da declaração para bater com o padrão da ANS
     xml_bytes = xml_bytes.replace(b"<?xml version='1.0' encoding='ISO-8859-1'?>", b'<?xml version="1.0" encoding="ISO-8859-1"?>')
     xml_bytes = xml_bytes.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
     
@@ -208,7 +204,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
     return xml_bytes, auditoria
 
 # ==========================================
-# INTERFACE GRÁFICA MAIS CLEAN E ORGANIZADA
+# INTERFACE GRÁFICA
 # ==========================================
 st.title("☁️ Sistema Integrado TISS - Unimed")
 
@@ -224,7 +220,7 @@ config_texto_colunas = {
 }
 
 with st.sidebar:
-    st.image("https://img.icons8.com/color/96/000000/medical-doctor.png", width=60) # Ícone limpo
+    st.image("https://img.icons8.com/color/96/000000/medical-doctor.png", width=60)
     st.header("Gestão de Dados")
     
     if st.button("📥 Puxar Dados da Nuvem", use_container_width=True):
@@ -239,7 +235,6 @@ with st.sidebar:
             
     st.divider()
     
-    # QoL 3: Importação em Massa via Excel
     st.subheader("📦 Importação em Massa")
     st.caption("Suba um arquivo Excel contendo planilhas com os mesmos nomes das abas (ex: anvisa, itens, medicos).")
     planilha_up = st.file_uploader("Subir Excel", type=['xlsx', 'xls'])
@@ -251,7 +246,6 @@ with st.sidebar:
                     st.session_state[f'tab_{aba}'] = formatar_tabela_padrao(df_importado)
             st.success("Tabelas importadas! Clique em 'Enviar para Nuvem' para gravar.")
 
-# Layout Principal
 col1, col2 = st.columns([1, 2])
 
 with col1:
@@ -263,7 +257,6 @@ with col1:
                 dfs_atuais = {k: st.session_state[f'tab_{k}'] for k in tabelas_padrao.keys()}
                 xml_resultado, auditoria = processar_xml_tiss(xml_up, dfs_atuais)
                 
-                # Armazena na sessão para a Coluna 2 exibir
                 st.session_state['xml_processado'] = xml_resultado
                 st.session_state['auditoria_atual'] = auditoria
                 st.session_state['nome_arquivo_original'] = xml_up.name
@@ -273,7 +266,6 @@ with col1:
 with col2:
     st.markdown("### 2️⃣ Resultado e Download")
     if 'xml_processado' in st.session_state:
-        # QoL 2: Relatório de Auditoria Clean
         aud = st.session_state['auditoria_atual']
         st.success("✅ Arquivo processado e Hash MD5 recalculado!")
         
@@ -294,11 +286,15 @@ with col2:
             use_container_width=True
         )
 
+        st.divider()
+        st.markdown("📄 **Visualização do XML**")
+        # O código volta a aparecer na tela para você copiar
+        st.code(st.session_state['xml_processado'].decode('ISO-8859-1'), language='xml')
+
 st.divider()
 st.markdown("### 🛠️ Regras de Negócio e Parametrização")
 abas = st.tabs(["Médicos e CBO", "De-Para Procedimentos", "Blindagem", "Itens e Medicamentos", "Unidades de Medida", "Registro ANVISA"])
 
-# Renderização Clean das Tabelas
 tabelas_nomes = ['medicos', 'procedimentos', 'blindagem', 'itens', 'unidades', 'anvisa']
 for i, aba_nome in enumerate(tabelas_nomes):
     with abas[i]:

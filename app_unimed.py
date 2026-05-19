@@ -12,7 +12,6 @@ from streamlit_gsheets import GSheetsConnection
 # ==========================================
 st.set_page_config(page_title="TISS Cloud", layout="wide", page_icon="☁️")
 
-# CSS para ocultar menus padrões do Streamlit e polir a interface
 st.markdown("""
     <style>
     #MainMenu {visibility: hidden;}
@@ -91,7 +90,7 @@ if "app_inicializado" not in st.session_state:
     st.session_state["app_inicializado"] = True
 
 # ==========================================
-# MOTOR DE CORREÇÃO DO XML REVISADO
+# MOTOR DE CORREÇÃO DO XML REVISADO (PROFUNDIDADE)
 # ==========================================
 def calcular_tempo_oxigenio(hora_ini_str, qtd_executada, tipo_unidade):
     try:
@@ -144,7 +143,6 @@ def processar_xml_tiss(arquivo_xml, dfs):
 
     for guia in root.findall('.//ans:guiaResumoInternacao', NS):
         
-        # --- BLINDAGEM ---
         prestador_elem = guia.find('.//ans:dadosPrestador/ans:codigoPrestadorNaOperadora', NS) or guia.find('.//ans:dadosContratado/ans:codigoPrestadorNaOperadora', NS)
         if prestador_elem is not None and limpar_numero(prestador_elem.text) in set_blindagem:
             auditoria['guias_blindadas'] += 1
@@ -155,45 +153,43 @@ def processar_xml_tiss(arquivo_xml, dfs):
             procs_para_remover = []
             
             for proc_exec in procs_container.findall('ans:procedimentoExecutado', NS):
-                cod_proc_elem = proc_exec.find('ans:codigoProcedimento', NS)
+                # CORREÇÃO CRÍTICA AQUI: Uso de './/' para buscar em profundidade o código
+                cod_proc_elem = proc_exec.find('.//ans:codigoProcedimento', NS)
                 cod_p = padronizar_codigo_8_digitos(cod_proc_elem.text) if cod_proc_elem is not None and cod_proc_elem.text else ""
                 
-                # Detectar presença de conveniado na equipe desse procedimento
                 tem_conveniado = False
                 equipes = proc_exec.findall('ans:identEquipe', NS)
                 for eq in equipes:
-                    ident_eq = eq.find('ans:identificacaoEquipe', NS)
-                    if ident_eq is None: continue
-                    nome_prof_elem = ident_eq.find('ans:nomeProf', NS)
+                    nome_prof_elem = eq.find('.//ans:nomeProf', NS)
                     nome_prof = nome_prof_elem.text.strip().upper() if nome_prof_elem is not None and nome_prof_elem.text else ""
                     if nome_prof in set_conveniados:
                         tem_conveniado = True
                         break
                 
-                # --- APLICAÇÃO DAS REGRAS CRÍTICAS DE EXCLUSÃO DE CONVENIADOS ---
                 if tem_conveniado:
-                    # Se começar com 4, 2, 04 ou 02 -> BLOQUEIA A EXCLUSÃO (Fica intacto)
                     if cod_p.startswith(('4', '2', '04', '02')):
                         pass 
                     else:
-                        # Caso contrário, remove o PROCEDIMENTO COMPLETO do faturamento
                         procs_para_remover.append(proc_exec)
                         auditoria['conveniados_excluidos'] += 1
-                        continue # Pula as outras correções pois o item deixará de existir
+                        continue 
                 
-                # --- PARAMETRIZAÇÃO DE PROCEDIMENTOS (VIA, TÉCNICA, GRAU PARTICIPAÇÃO) ---
+                # REGRAS DOS PROCEDIMENTOS (Agora o código é encontrado)
                 if cod_p in dict_procedimentos:
                     regra_p = dict_procedimentos[cod_p]
                     ajustou_p = False
                     
                     grau_val = limpar_numero(regra_p.get('Grau Part Obrigatório', ''))
                     if grau_val:
-                        grau_elem = proc_exec.find('ans:grauParticipacao', NS)
-                        if grau_elem is not None: grau_elem.text = grau_val
-                        else:
-                            grau_elem = ET.Element(ans_tag('grauParticipacao'))
-                            grau_elem.text = grau_val
-                            proc_exec.append(grau_elem)
+                        # CORREÇÃO CRÍTICA: Aplica o grau de participação dentro de identEquipe
+                        for eq in equipes:
+                            grau_elem = eq.find('ans:grauParticipacao', NS)
+                            if grau_elem is not None: 
+                                grau_elem.text = grau_val
+                            else:
+                                grau_elem = ET.Element(ans_tag('grauParticipacao'))
+                                grau_elem.text = grau_val
+                                eq.append(grau_elem)
                         ajustou_p = True
                         
                     via_val = str(regra_p.get('Via de Acesso (1, 2 ou EXCLUIR)', '')).strip().upper()
@@ -201,7 +197,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
                     if via_val == 'EXCLUIR' and via_elem is not None:
                         proc_exec.remove(via_elem)
                         ajustou_p = True
-                    elif via_val in ['1', '2']:
+                    elif via_val in ['1', '2', '01', '02']:
                         if via_elem is not None: via_elem.text = via_val
                         else:
                             via_elem = ET.Element(ans_tag('viaAcesso'))
@@ -214,7 +210,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
                     if tec_val == 'EXCLUIR' and tec_elem is not None:
                         proc_exec.remove(tec_elem)
                         ajustou_p = True
-                    elif tec_val in ['1', '2']:
+                    elif tec_val in ['1', '2', '01', '02']:
                         if tec_elem is not None: tec_elem.text = tec_val
                         else:
                             tec_elem = ET.Element(ans_tag('tecnica'))
@@ -224,17 +220,14 @@ def processar_xml_tiss(arquivo_xml, dfs):
                         
                     if ajustou_p: auditoria['procedimentos_ajustados'] += 1
 
-                # --- REGRAS DE MÉDICOS (CBO, CPF) ---
                 for eq in equipes:
-                    ident_eq = eq.find('ans:identificacaoEquipe', NS)
-                    if ident_eq is None: continue
-                    nome_prof_elem = ident_eq.find('ans:nomeProf', NS)
+                    nome_prof_elem = eq.find('.//ans:nomeProf', NS)
                     nome_prof = nome_prof_elem.text.strip().upper() if nome_prof_elem is not None and nome_prof_elem.text else ""
                     
                     if nome_prof in set_conveniados:
-                        continue # Não altera dados de conveniados mantidos pela proteção 4/2
+                        continue 
                     
-                    cbo_elem = ident_eq.find('ans:CBOS', NS)
+                    cbo_elem = eq.find('.//ans:CBOS', NS)
                     if nome_prof in dict_medicos:
                         regra_m = dict_medicos[nome_prof]
                         
@@ -247,7 +240,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
                         cod_operadora = limpar_numero(regra_m.get('Código na Operadora', ''))
                         
                         if substituir and cod_operadora != '':
-                            cod_prof_elem = ident_eq.find('ans:codProfissional', NS)
+                            cod_prof_elem = eq.find('.//ans:codProfissional', NS)
                             if cod_prof_elem is not None:
                                 cpf_elem = cod_prof_elem.find('ans:cpfContratado', NS)
                                 cod_op_elem = cod_prof_elem.find('ans:codigoPrestadorNaOperadora', NS)
@@ -260,17 +253,16 @@ def processar_xml_tiss(arquivo_xml, dfs):
                                     cod_op_elem.text = cod_operadora
                                     auditoria['cbos'] += 1
 
-            # Executa a remoção definitiva dos procedimentos inválidos detectados
             for p in procs_para_remover:
                 procs_container.remove(p)
 
-        # --- OUTRAS DESPESAS (ITENS, OXIGÊNIO, UNIDADES, ANVISA) ---
+        # ... (O RESTANTE MANTÉM-SE INTACTO)
         despesas_container = guia.find('.//ans:outrasDespesas', NS)
         if despesas_container is not None:
             for despesa in despesas_container.findall('ans:despesa', NS):
                 servicos = despesa.find('ans:servicosExecutados', NS)
                 if servicos is not None:
-                    cod_item_elem = servicos.find('ans:codigoProcedimento', NS)
+                    cod_item_elem = servicos.find('.//ans:codigoProcedimento', NS)
                     cod_item = padronizar_codigo_8_digitos(cod_item_elem.text) if cod_item_elem is not None and cod_item_elem.text else ""
                     
                     if cod_item in dict_itens:
@@ -334,7 +326,6 @@ config_texto_colunas = {
     "Ref. Fabricante": st.column_config.TextColumn("Ref. Fab.")
 }
 
-# --- CENTRAL DE SINCRONIZAÇÃO NO TOPO ---
 with st.container(border=True):
     st.markdown("### 🔄 Central de Sincronização e Controle de Dados")
     c_sync1, c_sync2, c_sync3 = st.columns([1, 1.2, 1.3], gap="medium")
@@ -365,7 +356,6 @@ with st.container(border=True):
 
 st.divider()
 
-# --- ÁREA DE CORREÇÃO DO XML ---
 col1, col2 = st.columns([1, 1.2], gap="large")
 
 with col1:
@@ -456,7 +446,6 @@ with col2:
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# --- BASE DE DADOS E PARAMETRIZAÇÃO ---
 with st.container(border=True):
     st.markdown("### 🛠️ Parametrização e Regras de Negócio")
     

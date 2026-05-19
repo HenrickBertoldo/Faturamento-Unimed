@@ -91,7 +91,7 @@ if "app_inicializado" not in st.session_state:
     st.session_state["app_inicializado"] = True
 
 # ==========================================
-# MOTOR DE CORREÇÃO DO XML (LOGICA COMPLETA ATIVADA)
+# MOTOR DE CORREÇÃO DO XML REVISADO
 # ==========================================
 def calcular_tempo_oxigenio(hora_ini_str, qtd_executada, tipo_unidade):
     try:
@@ -134,7 +134,6 @@ def processar_xml_tiss(arquivo_xml, dfs):
     tree = ET.parse(arquivo_xml)
     root = tree.getroot()
     
-    # Preparação dos dicionários de regras
     dict_medicos = {str(r['Nome do Médico']).strip().upper(): r for _, r in dfs['medicos'].iterrows()}
     set_conveniados = set(dfs['conveniados']['Nome do Médico Conveniado'].str.strip().str.upper().dropna())
     set_blindagem = set(dfs['blindagem']['Código Prestador Protegido'].apply(limpar_numero).dropna())
@@ -145,90 +144,105 @@ def processar_xml_tiss(arquivo_xml, dfs):
 
     for guia in root.findall('.//ans:guiaResumoInternacao', NS):
         
-        # --- REGRA DE BLINDAGEM ---
+        # --- BLINDAGEM ---
         prestador_elem = guia.find('.//ans:dadosPrestador/ans:codigoPrestadorNaOperadora', NS) or guia.find('.//ans:dadosContratado/ans:codigoPrestadorNaOperadora', NS)
         if prestador_elem is not None and limpar_numero(prestador_elem.text) in set_blindagem:
             auditoria['guias_blindadas'] += 1
-            continue  # Pula o processamento desta guia completamente
+            continue
             
         procs_container = guia.find('.//ans:procedimentosExecutados', NS)
         if procs_container is not None:
+            procs_para_remover = []
+            
             for proc_exec in procs_container.findall('ans:procedimentoExecutado', NS):
-                
-                # --- REGRA DE PROCEDIMENTOS (VIA, TÉCNICA, GRAU PARTICIPAÇÃO) ---
                 cod_proc_elem = proc_exec.find('ans:codigoProcedimento', NS)
-                if cod_proc_elem is not None:
-                    cod_p = padronizar_codigo_8_digitos(cod_proc_elem.text)
-                    if cod_p in dict_procedimentos:
-                        regra_p = dict_procedimentos[cod_p]
-                        ajustou_p = False
-                        
-                        # Grau de Participação
-                        grau_val = limpar_numero(regra_p.get('Grau Part Obrigatório', ''))
-                        if grau_val:
-                            grau_elem = proc_exec.find('ans:grauParticipacao', NS)
-                            if grau_elem is not None: grau_elem.text = grau_val
-                            else:
-                                grau_elem = ET.Element(ans_tag('grauParticipacao'))
-                                grau_elem.text = grau_val
-                                proc_exec.append(grau_elem)
-                            ajustou_p = True
-                            
-                        # Via de Acesso
-                        via_val = str(regra_p.get('Via de Acesso (1, 2 ou EXCLUIR)', '')).strip().upper()
-                        via_elem = proc_exec.find('ans:viaAcesso', NS)
-                        if via_val == 'EXCLUIR' and via_elem is not None:
-                            proc_exec.remove(via_elem)
-                            ajustou_p = True
-                        elif via_val in ['1', '2']:
-                            if via_elem is not None: via_elem.text = via_val
-                            else:
-                                via_elem = ET.Element(ans_tag('viaAcesso'))
-                                via_elem.text = via_val
-                                proc_exec.append(via_elem)
-                            ajustou_p = True
-                            
-                        # Técnica
-                        tec_val = str(regra_p.get('Técnica (1, 2 ou EXCLUIR)', '')).strip().upper()
-                        tec_elem = proc_exec.find('ans:tecnica', NS)
-                        if tec_val == 'EXCLUIR' and tec_elem is not None:
-                            proc_exec.remove(tec_elem)
-                            ajustou_p = True
-                        elif tec_val in ['1', '2']:
-                            if tec_elem is not None: tec_elem.text = tec_val
-                            else:
-                                tec_elem = ET.Element(ans_tag('tecnica'))
-                                tec_elem.text = tec_val
-                                proc_exec.append(tec_elem)
-                            ajustou_p = True
-                            
-                        if ajustou_p: auditoria['procedimentos_ajustados'] += 1
-
-                # --- REGRA DE MÉDICOS (CBO, CPF E EXCLUSÃO DE CONVENIADOS) ---
+                cod_p = padronizar_codigo_8_digitos(cod_proc_elem.text) if cod_proc_elem is not None and cod_proc_elem.text else ""
+                
+                # Detectar presença de conveniado na equipe desse procedimento
+                tem_conveniado = False
                 equipes = proc_exec.findall('ans:identEquipe', NS)
                 for eq in equipes:
                     ident_eq = eq.find('ans:identificacaoEquipe', NS)
                     if ident_eq is None: continue
                     nome_prof_elem = ident_eq.find('ans:nomeProf', NS)
                     nome_prof = nome_prof_elem.text.strip().upper() if nome_prof_elem is not None and nome_prof_elem.text else ""
-                    
-                    # Se o médico for CONVENIADO, deleta o bloco de equipe dele
                     if nome_prof in set_conveniados:
-                        proc_exec.remove(eq)
+                        tem_conveniado = True
+                        break
+                
+                # --- APLICAÇÃO DAS REGRAS CRÍTICAS DE EXCLUSÃO DE CONVENIADOS ---
+                if tem_conveniado:
+                    # Se começar com 4, 2, 04 ou 02 -> BLOQUEIA A EXCLUSÃO (Fica intacto)
+                    if cod_p.startswith(('4', '2', '04', '02')):
+                        pass 
+                    else:
+                        # Caso contrário, remove o PROCEDIMENTO COMPLETO do faturamento
+                        procs_para_remover.append(proc_exec)
                         auditoria['conveniados_excluidos'] += 1
-                        continue  # Vai para a próxima equipe
+                        continue # Pula as outras correções pois o item deixará de existir
+                
+                # --- PARAMETRIZAÇÃO DE PROCEDIMENTOS (VIA, TÉCNICA, GRAU PARTICIPAÇÃO) ---
+                if cod_p in dict_procedimentos:
+                    regra_p = dict_procedimentos[cod_p]
+                    ajustou_p = False
+                    
+                    grau_val = limpar_numero(regra_p.get('Grau Part Obrigatório', ''))
+                    if grau_val:
+                        grau_elem = proc_exec.find('ans:grauParticipacao', NS)
+                        if grau_elem is not None: grau_elem.text = grau_val
+                        else:
+                            grau_elem = ET.Element(ans_tag('grauParticipacao'))
+                            grau_elem.text = grau_val
+                            proc_exec.append(grau_elem)
+                        ajustou_p = True
+                        
+                    via_val = str(regra_p.get('Via de Acesso (1, 2 ou EXCLUIR)', '')).strip().upper()
+                    via_elem = proc_exec.find('ans:viaAcesso', NS)
+                    if via_val == 'EXCLUIR' and via_elem is not None:
+                        proc_exec.remove(via_elem)
+                        ajustou_p = True
+                    elif via_val in ['1', '2']:
+                        if via_elem is not None: via_elem.text = via_val
+                        else:
+                            via_elem = ET.Element(ans_tag('viaAcesso'))
+                            via_elem.text = via_val
+                            proc_exec.append(via_elem)
+                        ajustou_p = True
+                        
+                    tec_val = str(regra_p.get('Técnica (1, 2 ou EXCLUIR)', '')).strip().upper()
+                    tec_elem = proc_exec.find('ans:tecnica', NS)
+                    if tec_val == 'EXCLUIR' and tec_elem is not None:
+                        proc_exec.remove(tec_elem)
+                        ajustou_p = True
+                    elif tec_val in ['1', '2']:
+                        if tec_elem is not None: tec_elem.text = tec_val
+                        else:
+                            tec_elem = ET.Element(ans_tag('tecnica'))
+                            tec_elem.text = tec_val
+                            proc_exec.append(tec_elem)
+                        ajustou_p = True
+                        
+                    if ajustou_p: auditoria['procedimentos_ajustados'] += 1
+
+                # --- REGRAS DE MÉDICOS (CBO, CPF) ---
+                for eq in equipes:
+                    ident_eq = eq.find('ans:identificacaoEquipe', NS)
+                    if ident_eq is None: continue
+                    nome_prof_elem = ident_eq.find('ans:nomeProf', NS)
+                    nome_prof = nome_prof_elem.text.strip().upper() if nome_prof_elem is not None and nome_prof_elem.text else ""
+                    
+                    if nome_prof in set_conveniados:
+                        continue # Não altera dados de conveniados mantidos pela proteção 4/2
                     
                     cbo_elem = ident_eq.find('ans:CBOS', NS)
                     if nome_prof in dict_medicos:
                         regra_m = dict_medicos[nome_prof]
                         
-                        # Correção de CBO
                         cbo_novo = limpar_numero(regra_m['CBO Correto'])
                         if cbo_elem is not None and cbo_novo != '':
                             cbo_elem.text = cbo_novo
                             auditoria['cbos'] += 1
                         
-                        # Correção de CPF -> Código do Prestador da Operadora
                         substituir = str(regra_m.get('Substituir por Cód. Operadora', '')).strip().upper() == 'SIM'
                         cod_operadora = limpar_numero(regra_m.get('Código na Operadora', ''))
                         
@@ -246,6 +260,11 @@ def processar_xml_tiss(arquivo_xml, dfs):
                                     cod_op_elem.text = cod_operadora
                                     auditoria['cbos'] += 1
 
+            # Executa a remoção definitiva dos procedimentos inválidos detectados
+            for p in procs_para_remover:
+                procs_container.remove(p)
+
+        # --- OUTRAS DESPESAS (ITENS, OXIGÊNIO, UNIDADES, ANVISA) ---
         despesas_container = guia.find('.//ans:outrasDespesas', NS)
         if despesas_container is not None:
             for despesa in despesas_container.findall('ans:despesa', NS):
@@ -380,7 +399,7 @@ with col2:
             c4, c5, c6 = st.columns(3)
             c4.metric("📦 Unid. Medida", aud['unidades'])
             c5.metric("⏱️ Tempos O²", aud['oxigenio'])
-            c6.metric("🤝 Conveniados Removidos", aud['conveniados_excluidos'])
+            c6.metric("🤝 Procs. Conveniados Removidos", aud['conveniados_excluidos'])
 
             c7, c8, _ = st.columns(3)
             c7.metric("⚙️ Procs. Ajustados", aud['procedimentos_ajustados'])

@@ -126,7 +126,6 @@ def padronizar_codigo_8_digitos(cod):
     return "0" + c if len(c) == 7 and c.isdigit() else c
 
 def processar_xml_tiss(arquivo_xml, dfs):
-    # Dicionário de auditoria modificado para armazenar listas (logs) em vez de inteiros
     auditoria = { 
         'cbos': [], 'itens': [], 'anvisa': [], 'unidades': [], 'oxigenio': [],
         'conveniados_excluidos': [], 'procedimentos_ajustados': [], 'guias_blindadas': [] 
@@ -148,6 +147,11 @@ def processar_xml_tiss(arquivo_xml, dfs):
         if prestador_elem is not None and limpar_numero(prestador_elem.text) in set_blindagem:
             auditoria['guias_blindadas'].append(f"Guia ignorada (Prestador {limpar_numero(prestador_elem.text)} protegido)")
             continue
+
+        # --- NOVA REGRA: VALIDAÇÃO DA CARTEIRINHA 0014 ---
+        carteira_elem = guia.find('.//ans:dadosBeneficiario/ans:numeroCarteira', NS)
+        numero_carteira = limpar_numero(carteira_elem.text) if carteira_elem is not None and carteira_elem.text else ""
+        eh_unimed_0014 = numero_carteira.startswith('0014')
             
         procs_container = guia.find('.//ans:procedimentosExecutados', NS)
         if procs_container is not None:
@@ -166,10 +170,11 @@ def processar_xml_tiss(arquivo_xml, dfs):
                     nome_prof_elem = eq.find('.//ans:nomeProf', NS)
                     nome_prof = nome_prof_elem.text.strip().upper() if nome_prof_elem is not None and nome_prof_elem.text else ""
                     
-                    if nome_prof in set_conveniados:
+                    # A exclusão agora depende de eh_unimed_0014 ser True
+                    if eh_unimed_0014 and nome_prof in set_conveniados:
                         if not is_protected:
                             equipes_remover.append(eq)
-                            auditoria['conveniados_excluidos'].append(f"Removido médico(a) '{nome_prof}' do procedimento {cod_p}")
+                            auditoria['conveniados_excluidos'].append(f"Removido médico(a) '{nome_prof}' do procedimento {cod_p} (Carteira: {numero_carteira})")
                 
                 # Remove apenas a equipe do médico conveniado (mantém os outros)
                 for eq in equipes_remover:
@@ -418,7 +423,6 @@ with col2:
             c7.metric("⚙️ Procs. Ajustados", len(aud['procedimentos_ajustados']))
             c8.metric("🛡️ Guia(s) Blindada(s)", len(aud['guias_blindadas']))
             
-            # --- NOVO BLOCO: VISUALIZAÇÃO DOS DETALHES ---
             with st.expander("🔎 Ver Detalhes das Alterações"):
                 tem_alteracao = False
                 titulos_amigaveis = {
@@ -442,7 +446,6 @@ with col2:
                 
                 if not tem_alteracao:
                     st.info("Nenhuma alteração foi realizada neste XML com as regras atuais.")
-            # ----------------------------------------------
             
             st.divider()
             

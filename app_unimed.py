@@ -320,7 +320,7 @@ with col2:
                     b.style.borderColor = "rgba(46, 204, 113, 0.5)";
                     setTimeout(() => {{ 
                         b.innerText = "📋 Copiar Código-Fonte para a Área de Transferência"; 
-                        b.style.backgroundColor = "transparent";
+                        b.style.backgroundColor = "WHITE";
                         b.style.borderColor = "rgba(128, 128, 128, 0.5)";
                     }}, 3000);
                 }});

@@ -126,9 +126,10 @@ def padronizar_codigo_8_digitos(cod):
     return "0" + c if len(c) == 7 and c.isdigit() else c
 
 def processar_xml_tiss(arquivo_xml, dfs):
+    # Dicionário de auditoria modificado para armazenar listas (logs) em vez de inteiros
     auditoria = { 
-        'cbos': 0, 'itens': 0, 'anvisa': 0, 'unidades': 0, 'oxigenio': 0,
-        'conveniados_excluidos': 0, 'procedimentos_ajustados': 0, 'guias_blindadas': 0 
+        'cbos': [], 'itens': [], 'anvisa': [], 'unidades': [], 'oxigenio': [],
+        'conveniados_excluidos': [], 'procedimentos_ajustados': [], 'guias_blindadas': [] 
     }
     tree = ET.parse(arquivo_xml)
     root = tree.getroot()
@@ -145,7 +146,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
         
         prestador_elem = guia.find('.//ans:dadosPrestador/ans:codigoPrestadorNaOperadora', NS) or guia.find('.//ans:dadosContratado/ans:codigoPrestadorNaOperadora', NS)
         if prestador_elem is not None and limpar_numero(prestador_elem.text) in set_blindagem:
-            auditoria['guias_blindadas'] += 1
+            auditoria['guias_blindadas'].append(f"Guia ignorada (Prestador {limpar_numero(prestador_elem.text)} protegido)")
             continue
             
         procs_container = guia.find('.//ans:procedimentosExecutados', NS)
@@ -168,11 +169,11 @@ def processar_xml_tiss(arquivo_xml, dfs):
                     if nome_prof in set_conveniados:
                         if not is_protected:
                             equipes_remover.append(eq)
+                            auditoria['conveniados_excluidos'].append(f"Removido médico(a) '{nome_prof}' do procedimento {cod_p}")
                 
                 # Remove apenas a equipe do médico conveniado (mantém os outros)
                 for eq in equipes_remover:
                     proc_exec.remove(eq)
-                    auditoria['conveniados_excluidos'] += 1
                 
                 # Se o procedimento tinha equipe, mas TODOS eram conveniados e foram removidos, remove o procedimento inteiro
                 equipes_restantes = proc_exec.findall('ans:identEquipe', NS)
@@ -183,7 +184,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
                 # --- 2. REGRAS DOS PROCEDIMENTOS (GrauPart, Via, Tecnica) ---
                 if cod_p in dict_procedimentos:
                     regra_p = dict_procedimentos[cod_p]
-                    ajustou_p = False
+                    detalhes_proc = []
                     
                     grau_val = limpar_numero(regra_p.get('Grau Part Obrigatório', ''))
                     if grau_val:
@@ -202,36 +203,36 @@ def processar_xml_tiss(arquivo_xml, dfs):
                             bad_grau = eq.find('ans:grauParticipacao', NS)
                             if bad_grau is not None:
                                 eq.remove(bad_grau)
-                                
-                        ajustou_p = True
+                        detalhes_proc.append(f"Grau inserido: {grau_val}")
                         
                     via_val = str(regra_p.get('Via de Acesso (1, 2 ou EXCLUIR)', '')).strip().upper()
                     via_elem = proc_exec.find('ans:viaAcesso', NS)
                     if via_val == 'EXCLUIR' and via_elem is not None:
                         proc_exec.remove(via_elem)
-                        ajustou_p = True
+                        detalhes_proc.append("Via de Acesso excluída")
                     elif via_val in ['1', '2', '01', '02']:
                         if via_elem is not None: via_elem.text = via_val
                         else:
                             via_elem = ET.Element(ans_tag('viaAcesso'))
                             via_elem.text = via_val
                             proc_exec.append(via_elem)
-                        ajustou_p = True
+                        detalhes_proc.append(f"Via de Acesso ajustada: {via_val}")
                         
                     tec_val = str(regra_p.get('Técnica (1, 2 ou EXCLUIR)', '')).strip().upper()
                     tec_elem = proc_exec.find('ans:tecnica', NS)
                     if tec_val == 'EXCLUIR' and tec_elem is not None:
                         proc_exec.remove(tec_elem)
-                        ajustou_p = True
+                        detalhes_proc.append("Técnica excluída")
                     elif tec_val in ['1', '2', '01', '02']:
                         if tec_elem is not None: tec_elem.text = tec_val
                         else:
                             tec_elem = ET.Element(ans_tag('tecnica'))
                             tec_elem.text = tec_val
                             proc_exec.append(tec_elem)
-                        ajustou_p = True
+                        detalhes_proc.append(f"Técnica ajustada: {tec_val}")
                         
-                    if ajustou_p: auditoria['procedimentos_ajustados'] += 1
+                    if detalhes_proc: 
+                        auditoria['procedimentos_ajustados'].append(f"Proc {cod_p}: " + " | ".join(detalhes_proc))
 
                 # --- 3. REGRAS DOS MÉDICOS (CBO, Código Operadora) ---
                 for eq in equipes_restantes:
@@ -248,7 +249,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
                         cbo_novo = limpar_numero(regra_m['CBO Correto'])
                         if cbo_elem is not None and cbo_novo != '':
                             cbo_elem.text = cbo_novo
-                            auditoria['cbos'] += 1
+                            auditoria['cbos'].append(f"Médico(a) '{nome_prof}': CBO alterado para {cbo_novo}")
                         
                         substituir = str(regra_m.get('Substituir por Cód. Operadora', '')).strip().upper() == 'SIM'
                         cod_operadora = limpar_numero(regra_m.get('Código na Operadora', ''))
@@ -262,10 +263,10 @@ def processar_xml_tiss(arquivo_xml, dfs):
                                 if cpf_elem is not None:
                                     cpf_elem.tag = ans_tag('codigoPrestadorNaOperadora')
                                     cpf_elem.text = cod_operadora
-                                    auditoria['cbos'] += 1
+                                    auditoria['cbos'].append(f"Médico(a) '{nome_prof}': CPF substituído pelo Cód. Operadora {cod_operadora}")
                                 elif cod_op_elem is not None:
                                     cod_op_elem.text = cod_operadora
-                                    auditoria['cbos'] += 1
+                                    auditoria['cbos'].append(f"Médico(a) '{nome_prof}': Cód. Operadora alterado para {cod_operadora}")
 
             for p in procs_para_remover:
                 procs_container.remove(p)
@@ -278,27 +279,31 @@ def processar_xml_tiss(arquivo_xml, dfs):
                 if servicos is not None:
                     cod_item_elem = servicos.find('.//ans:codigoProcedimento', NS)
                     cod_item = padronizar_codigo_8_digitos(cod_item_elem.text) if cod_item_elem is not None and cod_item_elem.text else ""
+                    cod_original_log = cod_item
                     
                     if cod_item in dict_itens:
-                        cod_item_elem.text = dict_itens[cod_item]
-                        cod_item = dict_itens[cod_item]
-                        auditoria['itens'] += 1
+                        cod_novo = dict_itens[cod_item]
+                        cod_item_elem.text = cod_novo
+                        cod_item = cod_novo
+                        auditoria['itens'].append(f"Item alterado de {cod_original_log} para {cod_novo}")
 
                     if cod_item in ['60034335', '60034343']:
                         h_ini, h_fim, qtd_ex = servicos.find('ans:horaInicial', NS), servicos.find('ans:horaFinal', NS), servicos.find('ans:quantidadeExecutada', NS)
                         if h_ini is not None and h_fim is not None and qtd_ex is not None:
-                            h_fim.text = calcular_tempo_oxigenio(h_ini.text, qtd_ex.text, cod_item)
-                            auditoria['oxigenio'] += 1
+                            h_novo = calcular_tempo_oxigenio(h_ini.text, qtd_ex.text, cod_item)
+                            auditoria['oxigenio'].append(f"Oxigênio {cod_item}: Hora Final recalculada de {h_fim.text} para {h_novo}")
+                            h_fim.text = h_novo
 
                     if cod_item in dict_unidades:
                         unidade_elem = servicos.find('ans:unidadeMedida', NS)
                         val_unidade = dict_unidades[cod_item].zfill(3) if dict_unidades[cod_item].isdigit() else dict_unidades[cod_item]
-                        if unidade_elem is not None: unidade_elem.text = val_unidade
+                        if unidade_elem is not None: 
+                            unidade_elem.text = val_unidade
                         else:
                             unidade_elem = ET.Element(ans_tag('unidadeMedida'))
                             unidade_elem.text = val_unidade
                             servicos.append(unidade_elem)
-                        auditoria['unidades'] += 1
+                        auditoria['unidades'].append(f"Item {cod_item}: Unidade ajustada para {val_unidade}")
 
                     if cod_item in dict_anvisa:
                         regra_a = dict_anvisa[cod_item]
@@ -308,7 +313,10 @@ def processar_xml_tiss(arquivo_xml, dfs):
                         add_ref = ref_alvo != "" and (servicos.find('ans:codigoRefFabricante', NS) is None or not servicos.find('ans:codigoRefFabricante', NS).text)
                         if add_anvisa or add_ref:
                             reordenar_servico_executado(servicos, anvisa_alvo if add_anvisa else None, ref_alvo if add_ref else None)
-                            auditoria['anvisa'] += 1
+                            detalhes_anv = []
+                            if add_anvisa: detalhes_anv.append(f"ANVISA {anvisa_alvo}")
+                            if add_ref: detalhes_anv.append(f"Ref {ref_alvo}")
+                            auditoria['anvisa'].append(f"Item {cod_item}: Inserido " + " e ".join(detalhes_anv))
 
     # --- 5. LIMPEZA DO HASH E EXPORTAÇÃO ---
     hash_node = root.find('.//ans:hash', NS)
@@ -397,18 +405,44 @@ with col2:
             st.markdown("### 📊 Resultado da Auditoria")
             
             c1, c2, c3 = st.columns(3)
-            c1.metric("👩‍⚕️ CBOs / Códs", aud['cbos'])
-            c2.metric("🔄 Itens Traduzidos", aud['itens'])
-            c3.metric("🩺 Itens ANVISA", aud['anvisa'])
+            c1.metric("👩‍⚕️ CBOs / Códs", len(aud['cbos']))
+            c2.metric("🔄 Itens Traduzidos", len(aud['itens']))
+            c3.metric("🩺 Itens ANVISA", len(aud['anvisa']))
             
             c4, c5, c6 = st.columns(3)
-            c4.metric("📦 Unid. Medida", aud['unidades'])
-            c5.metric("⏱️ Tempos O²", aud['oxigenio'])
-            c6.metric("🤝 Procs. Conveniados Removidos", aud['conveniados_excluidos'])
+            c4.metric("📦 Unid. Medida", len(aud['unidades']))
+            c5.metric("⏱️ Tempos O²", len(aud['oxigenio']))
+            c6.metric("🤝 Procs. Conveniados Removidos", len(aud['conveniados_excluidos']))
 
             c7, c8, _ = st.columns(3)
-            c7.metric("⚙️ Procs. Ajustados", aud['procedimentos_ajustados'])
-            c8.metric("🛡️ Guia(s) Blindada(s)", aud['guias_blindadas'])
+            c7.metric("⚙️ Procs. Ajustados", len(aud['procedimentos_ajustados']))
+            c8.metric("🛡️ Guia(s) Blindada(s)", len(aud['guias_blindadas']))
+            
+            # --- NOVO BLOCO: VISUALIZAÇÃO DOS DETALHES ---
+            with st.expander("🔎 Ver Detalhes das Alterações"):
+                tem_alteracao = False
+                titulos_amigaveis = {
+                    'cbos': '👩‍⚕️ Médicos e CBOs Alterados',
+                    'itens': '🔄 Itens e Medicamentos Traduzidos',
+                    'anvisa': '🩺 Registros ANVISA Inseridos',
+                    'unidades': '📦 Unidades de Medida Ajustadas',
+                    'oxigenio': '⏱️ Tempos de Oxigênio Recalculados',
+                    'conveniados_excluidos': '🤝 Médicos Conveniados Removidos',
+                    'procedimentos_ajustados': '⚙️ Procedimentos Ajustados (Grau/Via/Técnica)',
+                    'guias_blindadas': '🛡️ Guias Protegidas/Blindadas (Ignoradas)'
+                }
+                
+                for chave, lista_logs in aud.items():
+                    if lista_logs:
+                        tem_alteracao = True
+                        st.markdown(f"**{titulos_amigaveis.get(chave, chave)}**")
+                        for item in lista_logs:
+                            st.caption(f"• {item}")
+                        st.markdown("---")
+                
+                if not tem_alteracao:
+                    st.info("Nenhuma alteração foi realizada neste XML com as regras atuais.")
+            # ----------------------------------------------
             
             st.divider()
             

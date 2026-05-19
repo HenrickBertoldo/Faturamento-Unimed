@@ -90,7 +90,7 @@ if "app_inicializado" not in st.session_state:
     st.session_state["app_inicializado"] = True
 
 # ==========================================
-# MOTOR DE CORREÇÃO DO XML REVISADO (PROFUNDIDADE)
+# MOTOR DE CORREÇÃO DO XML REVISADO 
 # ==========================================
 def calcular_tempo_oxigenio(hora_ini_str, qtd_executada, tipo_unidade):
     try:
@@ -153,43 +153,56 @@ def processar_xml_tiss(arquivo_xml, dfs):
             procs_para_remover = []
             
             for proc_exec in procs_container.findall('ans:procedimentoExecutado', NS):
-                # CORREÇÃO CRÍTICA AQUI: Uso de './/' para buscar em profundidade o código
                 cod_proc_elem = proc_exec.find('.//ans:codigoProcedimento', NS)
                 cod_p = padronizar_codigo_8_digitos(cod_proc_elem.text) if cod_proc_elem is not None and cod_proc_elem.text else ""
                 
-                tem_conveniado = False
-                equipes = proc_exec.findall('ans:identEquipe', NS)
-                for eq in equipes:
+                # --- 1. TRATAMENTO DE MÉDICOS CONVENIADOS E EQUIPES MISTAS ---
+                is_protected = cod_p.startswith(('4', '2', '04', '02'))
+                equipes_iniciais = proc_exec.findall('ans:identEquipe', NS)
+                equipes_remover = []
+                
+                for eq in equipes_iniciais:
                     nome_prof_elem = eq.find('.//ans:nomeProf', NS)
                     nome_prof = nome_prof_elem.text.strip().upper() if nome_prof_elem is not None and nome_prof_elem.text else ""
+                    
                     if nome_prof in set_conveniados:
-                        tem_conveniado = True
-                        break
+                        if not is_protected:
+                            equipes_remover.append(eq)
                 
-                if tem_conveniado:
-                    if cod_p.startswith(('4', '2', '04', '02')):
-                        pass 
-                    else:
-                        procs_para_remover.append(proc_exec)
-                        auditoria['conveniados_excluidos'] += 1
-                        continue 
+                # Remove apenas a equipe do médico conveniado (mantém os outros)
+                for eq in equipes_remover:
+                    proc_exec.remove(eq)
+                    auditoria['conveniados_excluidos'] += 1
                 
-                # REGRAS DOS PROCEDIMENTOS (Agora o código é encontrado)
+                # Se o procedimento tinha equipe, mas TODOS eram conveniados e foram removidos, remove o procedimento inteiro
+                equipes_restantes = proc_exec.findall('ans:identEquipe', NS)
+                if len(equipes_iniciais) > 0 and len(equipes_restantes) == 0:
+                    procs_para_remover.append(proc_exec)
+                    continue # Pula para o próximo procedimento
+                
+                # --- 2. REGRAS DOS PROCEDIMENTOS (GrauPart, Via, Tecnica) ---
                 if cod_p in dict_procedimentos:
                     regra_p = dict_procedimentos[cod_p]
                     ajustou_p = False
                     
                     grau_val = limpar_numero(regra_p.get('Grau Part Obrigatório', ''))
                     if grau_val:
-                        # CORREÇÃO CRÍTICA: Aplica o grau de participação dentro de identEquipe
-                        for eq in equipes:
-                            grau_elem = eq.find('ans:grauParticipacao', NS)
-                            if grau_elem is not None: 
-                                grau_elem.text = grau_val
-                            else:
-                                grau_elem = ET.Element(ans_tag('grauParticipacao'))
-                                grau_elem.text = grau_val
-                                eq.append(grau_elem)
+                        for eq in equipes_restantes: # Aplica grau apenas em quem sobrou na equipe
+                            ident_eq = eq.find('ans:identificacaoEquipe', NS)
+                            if ident_eq is not None:
+                                grau_elem = ident_eq.find('ans:grauPart', NS)
+                                if grau_elem is not None:
+                                    grau_elem.text = grau_val
+                                else:
+                                    grau_elem = ET.Element(ans_tag('grauPart'))
+                                    grau_elem.text = grau_val
+                                    ident_eq.insert(0, grau_elem)
+                                
+                            # Limpeza de resíduos de testes anteriores
+                            bad_grau = eq.find('ans:grauParticipacao', NS)
+                            if bad_grau is not None:
+                                eq.remove(bad_grau)
+                                
                         ajustou_p = True
                         
                     via_val = str(regra_p.get('Via de Acesso (1, 2 ou EXCLUIR)', '')).strip().upper()
@@ -220,7 +233,8 @@ def processar_xml_tiss(arquivo_xml, dfs):
                         
                     if ajustou_p: auditoria['procedimentos_ajustados'] += 1
 
-                for eq in equipes:
+                # --- 3. REGRAS DOS MÉDICOS (CBO, Código Operadora) ---
+                for eq in equipes_restantes:
                     nome_prof_elem = eq.find('.//ans:nomeProf', NS)
                     nome_prof = nome_prof_elem.text.strip().upper() if nome_prof_elem is not None and nome_prof_elem.text else ""
                     
@@ -256,7 +270,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
             for p in procs_para_remover:
                 procs_container.remove(p)
 
-        # ... (O RESTANTE MANTÉM-SE INTACTO)
+        # --- 4. DESPESAS EXTRAS (Itens, Oxigênio, Unidades, ANVISA) ---
         despesas_container = guia.find('.//ans:outrasDespesas', NS)
         if despesas_container is not None:
             for despesa in despesas_container.findall('ans:despesa', NS):
@@ -296,6 +310,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
                             reordenar_servico_executado(servicos, anvisa_alvo if add_anvisa else None, ref_alvo if add_ref else None)
                             auditoria['anvisa'] += 1
 
+    # --- 5. LIMPEZA DO HASH E EXPORTAÇÃO ---
     hash_node = root.find('.//ans:hash', NS)
     if hash_node is not None: hash_node.text = ""
 

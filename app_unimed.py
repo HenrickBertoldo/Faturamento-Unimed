@@ -209,7 +209,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
     return xml_bytes, auditoria
 
 # ==========================================
-# INTERFACE GRÁFICA - LAYOUT PREMIUM AJUSTADO
+# INTERFACE GRÁFICA
 # ==========================================
 st.title("☁️ Sistema Integrado TISS | UNIMED")
 st.caption("Automação, correção e validação de faturamento XML em nuvem.")
@@ -301,7 +301,6 @@ with col2:
             xml_str = st.session_state['xml_processado'].decode('ISO-8859-1')
             texto_escaped = xml_str.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
             
-            # --- AJUSTE: Botão com fundo branco sólido e alto contraste para Dark Mode ---
             html_copiar = f"""
             <button id="cpBtn" style="
                 width: 100%; background-color: #FFFFFF; color: #1E1E1E; 
@@ -339,12 +338,24 @@ with col2:
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# --- BASE DE DADOS (AJUSTADO: Sem distorções de tamanho vertical) ---
+# --- BASE DE DADOS (COM A ABA RESTAURADA) ---
 with st.container(border=True):
     st.markdown("### 🛠️ Parametrização e Regras de Negócio")
-    abas = st.tabs(["👩‍⚕️ Médicos e CBO", "⚙️ Procedimentos", "🛡️ Blindagem", "💊 Itens e Meds", "📦 Unidades", "🏥 Registro ANVISA"])
+    
+    # Restaurei a aba de "Médicos Conveniados" aqui na lista visual:
+    abas = st.tabs([
+        "👩‍⚕️ Médicos e CBO", 
+        "⚙️ Procedimentos", 
+        "🤝 Médicos Conveniados", 
+        "🛡️ Blindagem", 
+        "💊 Itens e Meds", 
+        "📦 Unidades", 
+        "🏥 Registro ANVISA"
+    ])
 
-    tabelas_nomes = ['medicos', 'procedimentos', 'blindagem', 'itens', 'unidades', 'anvisa']
+    # E aqui na ordem lógica de carregamento:
+    tabelas_nomes = ['medicos', 'procedimentos', 'conveniados', 'blindagem', 'itens', 'unidades', 'anvisa']
+    
     for i, aba_nome in enumerate(tabelas_nomes):
         with abas[i]:
             st.session_state[f'tab_{aba_nome}'] = st.data_editor(
@@ -352,5 +363,4 @@ with st.container(border=True):
                 num_rows="dynamic", 
                 use_container_width=True, 
                 column_config=config_texto_colunas
-                # height removido: agora expande e encolhe dinamicamente conforme os dados reais!
             )

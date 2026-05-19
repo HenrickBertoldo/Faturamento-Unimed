@@ -150,10 +150,31 @@ def processar_xml_tiss(arquivo_xml, dfs):
 
                     if nome_prof in dict_medicos:
                         regra_m = dict_medicos[nome_prof]
+                        
+                        # 1. Correção de CBO
                         cbo_novo = limpar_numero(regra_m['CBO Correto'])
                         if cbo_elem is not None and cbo_novo != '':
                             cbo_elem.text = cbo_novo
                             auditoria['cbos'] += 1
+                        
+                        # 2. Correção de CPF -> Código do Prestador da Operadora
+                        substituir = str(regra_m.get('Substituir por Cód. Operadora', '')).strip().upper() == 'SIM'
+                        cod_operadora = limpar_numero(regra_m.get('Código na Operadora', ''))
+                        
+                        if substituir and cod_operadora != '':
+                            cod_prof_elem = ident_eq.find('ans:codProfissional', NS)
+                            if cod_prof_elem is not None:
+                                cpf_elem = cod_prof_elem.find('ans:cpfContratado', NS)
+                                cod_op_elem = cod_prof_elem.find('ans:codigoPrestadorNaOperadora', NS)
+                                
+                                # Se estiver mapeado como CPF, transforma a tag para Código do Prestador
+                                if cpf_elem is not None:
+                                    cpf_elem.tag = ans_tag('codigoPrestadorNaOperadora')
+                                    cpf_elem.text = cod_operadora
+                                    auditoria['cbos'] += 1
+                                elif cod_op_elem is not None:
+                                    cod_op_elem.text = cod_operadora
+                                    auditoria['cbos'] += 1
 
         despesas_container = guia.find('.//ans:outrasDespesas', NS)
         if despesas_container is not None:
@@ -224,40 +245,43 @@ config_texto_colunas = {
     "Ref. Fabricante": st.column_config.TextColumn("Ref. Fab.")
 }
 
-# --- BARRA LATERAL ---
-with st.sidebar:
-    st.header("Painel de Controle")
+# --- CENTRAL DE SINCRONIZAÇÃO (NOVO PAINEL 100% VISÍVEL NO TOPO) ---
+with st.container(border=True):
+    st.markdown("### 🔄 Central de Sincronização e Controle de Dados")
+    c_sync1, c_sync2, c_sync3 = st.columns([1, 1.2, 1.3], gap="medium")
     
-    with st.container(border=True):
-        st.markdown("**🔄 Sincronização**")
-        if st.button("📥 Puxar da Nuvem", use_container_width=True):
+    with c_sync1:
+        st.markdown("**1️⃣ Puxar Configurações**")
+        if st.button("📥 Puxar Regras da Nuvem", use_container_width=True):
             carregar_do_sheets()
             st.rerun()
-
-        with st.expander("💾 Gravar Alterações", expanded=False):
-            confirmar_salvamento = st.checkbox("Confirmar sobrescrita")
-            if st.button("Enviar para Nuvem", type="primary", use_container_width=True, disabled=not confirmar_salvamento):
-                salvar_no_sheets()
-                st.rerun()
-                
-    with st.container(border=True):
-        st.markdown("**📦 Carga em Massa**")
-        st.caption("Suba um arquivo Excel para alimentar as tabelas.")
-        planilha_up = st.file_uploader("Upload Excel", type=['xlsx', 'xls'], label_visibility="collapsed")
+            
+    with c_sync2:
+        st.markdown("**2️⃣ Salvar Novas Configurações**")
+        confirmar_salvamento = st.checkbox("Confirmar atualização no Google Sheets")
+        if st.button("💾 Gravar Alterações na Nuvem", type="primary", use_container_width=True, disabled=not confirmar_salvamento):
+            salvar_no_sheets()
+            st.rerun()
+            
+    with c_sync3:
+        st.markdown("**3️⃣ Carga em Massa (Opcional)**")
+        planilha_up = st.file_uploader("Upload Excel (.xlsx)", type=['xlsx', 'xls'], label_visibility="collapsed")
         if planilha_up:
-            if st.button("Importar Planilha", use_container_width=True):
+            if st.button("Importar Planilha Completa", use_container_width=True):
                 xls = pd.read_excel(planilha_up, sheet_name=None, dtype=str)
                 for aba, df_importado in xls.items():
                     if aba in tabelas_padrao:
                         st.session_state[f'tab_{aba}'] = formatar_tabela_padrao(df_importado)
-                st.success("Importado! Clique em 'Gravar Alterações' para salvar.")
+                st.success("Tabelas alimentadas! Marque a confirmação ao lado e clique em 'Gravar Alterações na Nuvem'.")
 
-# --- ÁREA PRINCIPAL ---
+st.divider()
+
+# --- ÁREA DE CORREÇÃO DO XML ---
 col1, col2 = st.columns([1, 1.2], gap="large")
 
 with col1:
     with st.container(border=True):
-        st.markdown("### 1️⃣ Processamento do Lote")
+        st.markdown("### 📜 Processamento do Lote XML")
         st.markdown("Arraste o arquivo XML gerado pelo seu sistema aqui.")
         xml_up = st.file_uploader("Arraste o arquivo XML", type=['xml'], label_visibility="collapsed")
         
@@ -276,15 +300,15 @@ with col2:
     if 'xml_processado' in st.session_state:
         with st.container(border=True):
             aud = st.session_state['auditoria_atual']
-            st.markdown("### 2️⃣ Resultado da Auditoria")
+            st.markdown("### 📊 Resultado da Auditoria")
             
             c1, c2, c3 = st.columns(3)
-            c1.metric("👩‍⚕️ CBOs", aud['cbos'])
-            c2.metric("🔄 Itens", aud['itens'])
-            c3.metric("🩺 ANVISA", aud['anvisa'])
+            c1.metric("👩‍⚕️ CBOs / Códs", aud['cbos'])
+            c2.metric("🔄 Itens Traduzidos", aud['itens'])
+            c3.metric("🩺 Itens ANVISA", aud['anvisa'])
             
             c4, c5, _ = st.columns(3)
-            c4.metric("📦 Unidades", aud['unidades'])
+            c4.metric("📦 Unid. Medida", aud['unidades'])
             c5.metric("⏱️ Tempos O²", aud['oxigenio'])
             
             st.divider()
@@ -338,11 +362,10 @@ with col2:
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# --- BASE DE DADOS (COM A ABA RESTAURADA) ---
+# --- BASE DE DADOS E PARAMETRIZAÇÃO ---
 with st.container(border=True):
     st.markdown("### 🛠️ Parametrização e Regras de Negócio")
     
-    # Restaurei a aba de "Médicos Conveniados" aqui na lista visual:
     abas = st.tabs([
         "👩‍⚕️ Médicos e CBO", 
         "⚙️ Procedimentos", 
@@ -353,7 +376,6 @@ with st.container(border=True):
         "🏥 Registro ANVISA"
     ])
 
-    # E aqui na ordem lógica de carregamento:
     tabelas_nomes = ['medicos', 'procedimentos', 'conveniados', 'blindagem', 'itens', 'unidades', 'anvisa']
     
     for i, aba_nome in enumerate(tabelas_nomes):

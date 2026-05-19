@@ -8,24 +8,13 @@ from datetime import datetime, timedelta
 from streamlit_gsheets import GSheetsConnection
 
 # ==========================================
-# CONFIGURAÇÃO DA PÁGINA (Deve ser o primeiro comando)
+# CONFIGURAÇÃO DA PÁGINA 
 # ==========================================
 st.set_page_config(page_title="TISS Cloud", layout="wide", page_icon="☁️")
 
-# ==========================================
-# CSS CUSTOMIZADO PARA UM VISUAL MAIS CLEAN
-# ==========================================
+# CSS apenas para esconder o menu padrão do Streamlit (deixa com cara de software profissional)
 st.markdown("""
     <style>
-    /* Suaviza as bordas e dá um visual de card para os containers */
-    div[data-testid="stMetric"] {
-        background-color: #f8f9fa;
-        border: 1px solid #e9ecef;
-        padding: 15px;
-        border-radius: 10px;
-        box-shadow: 2px 2px 5px rgba(0,0,0,0.02);
-    }
-    /* Oculta o menu padrão do Streamlit para o usuário final */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
@@ -104,7 +93,6 @@ if "app_inicializado" not in st.session_state:
 # ==========================================
 # MOTOR DE CORREÇÃO DO XML
 # ==========================================
-# (As funções de correção permanecem idênticas, para garantir a estabilidade que já alcançamos)
 def calcular_tempo_oxigenio(hora_ini_str, qtd_executada, tipo_unidade):
     try:
         t_ini = datetime.strptime(hora_ini_str.strip(), "%H:%M:%S")
@@ -221,11 +209,10 @@ def processar_xml_tiss(arquivo_xml, dfs):
     return xml_bytes, auditoria
 
 # ==========================================
-# INTERFACE GRÁFICA - LAYOUT PREMIUM
+# INTERFACE GRÁFICA - LAYOUT CORRIGIDO
 # ==========================================
-# Título Principal Moderno
-st.markdown("<h1>☁️ Sistema Integrado TISS <span style='color: #009688; font-size: 24px;'>| UNIMED</span></h1>", unsafe_allow_html=True)
-st.markdown("<p style='color: #666; margin-bottom: 30px;'>Automação, correção e validação de faturamento XML em nuvem.</p>", unsafe_allow_html=True)
+st.title("☁️ Sistema Integrado TISS | UNIMED")
+st.caption("Automação, correção e validação de faturamento XML em nuvem.")
 
 config_texto_colunas = {
     "Código do Item": st.column_config.TextColumn("Código (Com zeros)"),
@@ -237,10 +224,9 @@ config_texto_colunas = {
     "Ref. Fabricante": st.column_config.TextColumn("Ref. Fab.")
 }
 
-# --- BARRA LATERAL ORGANIZADA ---
+# --- BARRA LATERAL ---
 with st.sidebar:
-    st.image("https://img.icons8.com/color/96/000000/medical-doctor.png", width=70)
-    st.markdown("### Painel de Controle")
+    st.header("Painel de Controle")
     
     with st.container(border=True):
         st.markdown("**🔄 Sincronização**")
@@ -256,7 +242,7 @@ with st.sidebar:
                 
     with st.container(border=True):
         st.markdown("**📦 Carga em Massa**")
-        st.caption("Suba um arquivo Excel para alimentar as tabelas de uma só vez.")
+        st.caption("Suba um arquivo Excel para alimentar as tabelas.")
         planilha_up = st.file_uploader("Upload Excel", type=['xlsx', 'xls'], label_visibility="collapsed")
         if planilha_up:
             if st.button("Importar Planilha", use_container_width=True):
@@ -264,15 +250,15 @@ with st.sidebar:
                 for aba, df_importado in xls.items():
                     if aba in tabelas_padrao:
                         st.session_state[f'tab_{aba}'] = formatar_tabela_padrao(df_importado)
-                st.success("Tabelas importadas! Clique em 'Gravar Alterações' para salvar na nuvem.")
+                st.success("Importado! Clique em 'Gravar Alterações' para salvar.")
 
-# --- ÁREA PRINCIPAL (CARDS) ---
+# --- ÁREA PRINCIPAL ---
 col1, col2 = st.columns([1, 1.2], gap="large")
 
 with col1:
     with st.container(border=True):
         st.markdown("### 1️⃣ Processamento do Lote")
-        st.markdown("Arraste o arquivo XML gerado pelo seu sistema de gestão aqui para aplicar as regras de negócio.")
+        st.markdown("Arraste o arquivo XML gerado pelo seu sistema aqui.")
         xml_up = st.file_uploader("Arraste o arquivo XML", type=['xml'], label_visibility="collapsed")
         
         if xml_up:
@@ -292,20 +278,19 @@ with col2:
             aud = st.session_state['auditoria_atual']
             st.markdown("### 2️⃣ Resultado da Auditoria")
             
-            # Métricas organizadas em cards (via CSS)
             c1, c2, c3 = st.columns(3)
-            c1.metric("👩‍⚕️ CBOs", aud['cbos'], help="CBOs de médicos corrigidos")
-            c2.metric("🔄 Itens", aud['itens'], help="Códigos de materiais trocados")
-            c3.metric("🩺 ANVISA", aud['anvisa'], help="Tags injetadas")
+            c1.metric("👩‍⚕️ CBOs", aud['cbos'])
+            c2.metric("🔄 Itens", aud['itens'])
+            c3.metric("🩺 ANVISA", aud['anvisa'])
             
             c4, c5, _ = st.columns(3)
-            c4.metric("📦 Unidades", aud['unidades'], help="Unidades de medida padronizadas")
-            c5.metric("⏱️ Tempos O²", aud['oxigenio'], help="Tempos de oxigenoterapia recalculados")
+            c4.metric("📦 Unidades", aud['unidades'])
+            c5.metric("⏱️ Tempos O²", aud['oxigenio'])
             
             st.divider()
             
             st.download_button(
-                label="📥 Fazer Download do XML Validado (Recomendado)", 
+                label="📥 Baixar XML Validado", 
                 data=st.session_state['xml_processado'], 
                 file_name=f"PRONTO_{st.session_state['nome_arquivo_original']}", 
                 mime="application/xml", 
@@ -316,24 +301,27 @@ with col2:
             xml_str = st.session_state['xml_processado'].decode('ISO-8859-1')
             texto_escaped = xml_str.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
             
+            # Botão de cópia ajustado para funcionar bem tanto no tema claro quanto escuro (Fundo transparente)
             html_copiar = f"""
             <button id="cpBtn" style="
-                width: 100%; background-color: #ffffff; color: #31333f; 
-                border: 1px solid #d3d4d8; padding: 10px; border-radius: 6px; 
+                width: 100%; background-color: transparent; color: inherit; 
+                border: 1px solid rgba(128, 128, 128, 0.5); padding: 10px; border-radius: 6px; 
                 cursor: pointer; font-size: 14px; font-weight: 500;
-                transition: 0.2s; box-shadow: 0px 2px 4px rgba(0,0,0,0.05);
-            " onmouseover="this.style.backgroundColor='#f8f9fa'" onmouseout="this.style.backgroundColor='#ffffff'">
+                transition: 0.2s; color: var(--text-color);
+            " onmouseover="this.style.backgroundColor='rgba(128, 128, 128, 0.1)'" onmouseout="this.style.backgroundColor='transparent'">
             📋 Copiar Código-Fonte para a Área de Transferência
             </button>
             <script>
             document.getElementById("cpBtn").addEventListener("click", () => {{
                 navigator.clipboard.writeText(`{texto_escaped}`).then(() => {{
                     let b = document.getElementById("cpBtn");
-                    b.innerText = "✅ Copiado! Pronto para colar no Validador.";
-                    b.style.backgroundColor = "#e8f5e9"; b.style.color = "#2e7d32"; b.style.borderColor = "#c8e6c9";
+                    b.innerText = "✅ Copiado com Sucesso!";
+                    b.style.backgroundColor = "rgba(46, 204, 113, 0.2)";
+                    b.style.borderColor = "rgba(46, 204, 113, 0.5)";
                     setTimeout(() => {{ 
                         b.innerText = "📋 Copiar Código-Fonte para a Área de Transferência"; 
-                        b.style.backgroundColor = "#ffffff"; b.style.color = "#31333f"; b.style.borderColor = "#d3d4d8";
+                        b.style.backgroundColor = "transparent";
+                        b.style.borderColor = "rgba(128, 128, 128, 0.5)";
                     }}, 3000);
                 }});
             }});
@@ -344,16 +332,14 @@ with col2:
             with st.expander("🔍 Inspecionar Código Visualmente"):
                 st.code(xml_str, language='xml')
     else:
-        # Placeholder enquanto o usuário não processa nada
         with st.container(border=True):
-            st.markdown("<div style='text-align: center; color: #999; padding: 40px;'><h4>Aguardando Arquivo</h4><p>Faça o upload e clique em processar para ver o relatório aqui.</p></div>", unsafe_allow_html=True)
+            st.info("Aguardando arquivo XML. Faça o upload na coluna ao lado.")
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# --- BASE DE DADOS (ABAS) ---
+# --- BASE DE DADOS ---
 with st.container(border=True):
     st.markdown("### 🛠️ Parametrização e Regras de Negócio")
-    st.caption("Edite os valores abaixo diretamente na tabela. Não se esqueça de salvar na barra lateral.")
     abas = st.tabs(["👩‍⚕️ Médicos e CBO", "⚙️ Procedimentos", "🛡️ Blindagem", "💊 Itens e Meds", "📦 Unidades", "🏥 Registro ANVISA"])
 
     tabelas_nomes = ['medicos', 'procedimentos', 'blindagem', 'itens', 'unidades', 'anvisa']
@@ -364,5 +350,5 @@ with st.container(border=True):
                 num_rows="dynamic", 
                 use_container_width=True, 
                 column_config=config_texto_colunas,
-                height=350 # Fixa a altura para não quebrar o layout se tiver muitas linhas
+                height=350
             )

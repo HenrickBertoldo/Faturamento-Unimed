@@ -91,7 +91,7 @@ if "app_inicializado" not in st.session_state:
     st.session_state["app_inicializado"] = True
 
 # ==========================================
-# MOTOR DE CORREÇÃO DO XML REVISADO 
+# MOTOR DE CORREÇÃO DO XML REVISADO (SUPORTE SADT)
 # ==========================================
 def calcular_tempo_oxigenio(hora_ini_str, qtd_executada, tipo_unidade):
     try:
@@ -136,15 +136,15 @@ def processar_xml_tiss(arquivo_xml, dfs):
     
     dict_medicos = {str(r['Nome do Médico']).strip().upper(): r for _, r in dfs['medicos'].iterrows()}
     
-    # Dicionário estruturado para mapear a substituição de Nome e CRM
+    # Mapeamento da substituição de Nome e CRM
     dict_troca = {}
     for _, r in dfs['troca_medicos'].iterrows():
         orig = str(r['Médico Original (Incorreto)']).strip().upper()
         sub = str(r['Médico Substituto (Correto)']).strip().upper()
         crm_sub = limpar_numero(r['CRM Substituto'])
-        if orig and orig != 'NAN':
+        if orig and orig != 'NAN' and orig != '':
             dict_troca[orig] = {
-                'nome_novo': sub if sub != 'NAN' else "",
+                'nome_novo': sub if (sub != 'NAN' and sub != '') else orig,
                 'crm_novo': crm_sub
             }
 
@@ -166,13 +166,77 @@ def processar_xml_tiss(arquivo_xml, dfs):
             auditoria['guias_blindadas'].append(f"Guia ignorada (Prestador {limpar_numero(prestador_elem.text)} protegido)")
             continue
 
-        # VALIDAÇÃO DA CARTEIRINHA 0014 (SADT ignora exclusão de conveniado de forma nativa)
+        # VALIDAÇÃO DA CARTEIRINHA 0014
         eh_unimed_0014 = False
         if tipo_guia == 'internacao':
             carteira_elem = guia.find('.//ans:dadosBeneficiario/ans:numeroCarteira', NS)
             numero_carteira = limpar_numero(carteira_elem.text) if carteira_elem is not None and carteira_elem.text else ""
             eh_unimed_0014 = numero_carteira.startswith('0014')
-            
+
+        # =========================================================================
+        # 🔄 ABORDAGEM GLOBAL ATUALIZADA (PROCURA POR IDENTIFICACAO EQUIPE E EQUIPE SADT)
+        # =========================================================================
+        
+        # Procura em todos os possíveis nós contendo dados de equipe médica (Internação ou SADT)
+        for ident_eq in guia.findall('.//ans:identificacaoEquipe', NS) + guia.findall('.//ans:equipeSadt', NS):
+            nome_prof_elem = ident_eq.find('ans:nomeProf', NS)
+            if nome_prof_elem is not None and nome_prof_elem.text:
+                nome_prof = nome_prof_elem.text.strip().upper()
+                if nome_prof in dict_troca:
+                    nome_novo = dict_troca[nome_prof]['nome_novo']
+                    crm_novo = dict_troca[nome_prof]['crm_novo']
+                    
+                    if nome_novo: nome_prof_elem.text = nome_novo
+                    if crm_novo:
+                        crm_elem = ident_eq.find('ans:numeroConselhoProfissional', NS)
+                        if crm_elem is not None: crm_elem.text = crm_novo
+                        else:
+                            crm_elem = ET.Element(ans_tag('numeroConselhoProfissional'))
+                            crm_elem.text = crm_novo
+                            ident_eq.append(crm_elem)
+                    auditoria['medicos_trocados'].append(f"Guia {tipo_guia.upper()} (Equipe): '{nome_prof}' trocado por '{nome_novo}' (CRM: {crm_novo})")
+
+        # Local 2: No profissional executante geral da Guia
+        for prof_exec in guia.findall('.//ans:profissionalExecutante', NS):
+            nome_prof_elem = prof_exec.find('ans:nomeProfissional', NS)
+            if nome_prof_elem is not None and nome_prof_elem.text:
+                nome_prof = nome_prof_elem.text.strip().upper()
+                if nome_prof in dict_troca:
+                    nome_novo = dict_troca[nome_prof]['nome_novo']
+                    crm_novo = dict_troca[nome_prof]['crm_novo']
+                    
+                    if nome_novo: nome_prof_elem.text = nome_novo
+                    if crm_novo:
+                        crm_elem = prof_exec.find('ans:numeroConselhoProfissional', NS)
+                        if crm_elem is not None: crm_elem.text = crm_novo
+                        else:
+                            crm_elem = ET.Element(ans_tag('numeroConselhoProfissional'))
+                            crm_elem.text = crm_novo
+                            prof_exec.append(crm_elem)
+                    auditoria['medicos_trocados'].append(f"Guia {tipo_guia.upper()} (Executante Geral): '{nome_prof}' trocado por '{nome_novo}' (CRM: {crm_novo})")
+
+        # Local 3: No médico solicitante
+        for med_sol in guia.findall('.//ans:medicoSolicitante', NS):
+            nome_prof_elem = med_sol.find('ans:nomeMedico', NS)
+            if nome_prof_elem is not None and nome_prof_elem.text:
+                nome_prof = nome_prof_elem.text.strip().upper()
+                if nome_prof in dict_troca:
+                    nome_novo = dict_troca[nome_prof]['nome_novo']
+                    crm_novo = dict_troca[nome_prof]['crm_novo']
+                    
+                    if nome_novo: nome_prof_elem.text = nome_novo
+                    if crm_novo:
+                        crm_elem = med_sol.find('ans:numeroConselhoProfissional', NS)
+                        if crm_elem is not None: crm_elem.text = crm_novo
+                        else:
+                            crm_elem = ET.Element(ans_tag('numeroConselhoProfissional'))
+                            crm_elem.text = crm_novo
+                            med_sol.append(crm_elem)
+                    auditoria['medicos_trocados'].append(f"Guia {tipo_guia.upper()} (Solicitante): '{nome_prof}' trocado por '{nome_novo}' (CRM: {crm_novo})")
+
+        # =========================================================================
+        # REGRAS COMPLEMENTARES DE PROCEDIMENTOS, CBOS E REMOÇÕES
+        # =========================================================================
         procs_container = guia.find('.//ans:procedimentosExecutados', NS)
         if procs_container is not None:
             procs_para_remover = []
@@ -182,37 +246,16 @@ def processar_xml_tiss(arquivo_xml, dfs):
                 cod_p = padronizar_codigo_8_digitos(cod_proc_elem.text) if cod_proc_elem is not None and cod_proc_elem.text else ""
                 
                 is_protected = cod_p.startswith(('4', '2', '04', '02'))
-                equipes_iniciais = proc_exec.findall('ans:identEquipe', NS)
+                
+                # Mapeia ambas as possibilidades de equipe do procedimento
+                equipes_iniciais = proc_exec.findall('ans:identEquipe', NS) + proc_exec.findall('ans:equipeSadt', NS)
                 equipes_remover = []
                 
                 for eq in equipes_iniciais:
                     nome_prof_elem = eq.find('.//ans:nomeProf', NS)
                     nome_prof = nome_prof_elem.text.strip().upper() if nome_prof_elem is not None and nome_prof_elem.text else ""
                     
-                    # --- REGRA: TROCA DE MÉDICOS E CRM ---
-                    if nome_prof in dict_troca:
-                        nome_novo = dict_troca[nome_prof]['nome_novo']
-                        crm_novo = dict_troca[nome_prof]['crm_novo']
-                        
-                        if nome_prof_elem is not None and nome_novo:
-                            nome_prof_elem.text = nome_novo
-                        
-                        # Altera o CRM na tag correta dentro do profissional
-                        if crm_novo:
-                            cod_prof_elem = eq.find('.//ans:codProfissional', NS)
-                            if cod_prof_elem is not None:
-                                crm_elem = cod_prof_elem.find('ans:numeroConselhoProfissional', NS)
-                                if crm_elem is not None:
-                                    crm_elem.text = crm_novo
-                                else:
-                                    crm_elem = ET.Element(ans_tag('numeroConselhoProfissional'))
-                                    crm_elem.text = crm_novo
-                                    cod_prof_elem.append(crm_elem)
-                                    
-                        auditoria['medicos_trocados'].append(f"Guia {tipo_guia.upper()}: '{nome_prof}' trocado por '{nome_novo}' (CRM Novo: {crm_novo})")
-                        nome_prof = nome_novo  # Atualiza a referência local para as próximas regras
-                    
-                    # --- TRATAMENTO DE MÉDICOS CONVENIADOS ---
+                    # Tratamento de médicos conveniados
                     if tipo_guia == 'internacao' and eh_unimed_0014 and nome_prof in set_conveniados:
                         if not is_protected:
                             equipes_remover.append(eq)
@@ -221,12 +264,12 @@ def processar_xml_tiss(arquivo_xml, dfs):
                 for eq in equipes_remover:
                     proc_exec.remove(eq)
                 
-                equipes_restantes = proc_exec.findall('ans:identEquipe', NS)
+                equipes_restantes = proc_exec.findall('ans:identEquipe', NS) + proc_exec.findall('ans:equipeSadt', NS)
                 if len(equipes_iniciais) > 0 and len(equipes_restantes) == 0:
                     procs_para_remover.append(proc_exec)
                     continue 
                 
-                # --- REGRAS DOS PROCEDIMENTOS (GrauPart, Via, Tecnica) ---
+                # Ajustes de GrauPart, Via e Técnica nos procedimentos
                 if cod_p in dict_procedimentos:
                     regra_p = dict_procedimentos[cod_p]
                     detalhes_proc = []
@@ -234,19 +277,25 @@ def processar_xml_tiss(arquivo_xml, dfs):
                     grau_val = limpar_numero(regra_p.get('Grau Part Obrigatório', ''))
                     if grau_val:
                         for eq in equipes_restantes:
-                            ident_eq = eq.find('ans:identificacaoEquipe', NS)
-                            if ident_eq is not None:
-                                grau_elem = ident_eq.find('ans:grauPart', NS)
-                                if grau_elem is not None:
-                                    grau_elem.text = grau_val
-                                else:
-                                    grau_elem = ET.Element(ans_tag('grauPart'))
-                                    grau_elem.text = grau_val
-                                    ident_eq.insert(0, grau_elem)
+                            # Se for equipeSadt, as tags de grau ficam direto nela
+                            if tag_limpa(eq) == 'equipeSadt':
+                                target_node = eq
+                            else:
+                                target_node = eq.find('ans:identificacaoEquipe', NS)
+                                if target_node is None: target_node = eq
                                 
-                            bad_grau = eq.find('ans:grauParticipacao', NS)
-                            if bad_grau is not None:
-                                eq.remove(bad_grau)
+                            grau_elem = target_node.find('ans:grauPart', NS)
+                            if grau_elem is not None: grau_elem.text = grau_val
+                            else:
+                                grau_elem = ET.Element(ans_tag('grauPart'))
+                                grau_elem.text = grau_val
+                                target_node.insert(0, grau_elem)
+                            
+                            # Remove variações antigas de tag de grau se houver
+                            for parent in eq.iter():
+                                for bad_grau in parent.findall('ans:grauParticipacao', NS):
+                                    parent.remove(bad_grau)
+                                    
                         detalhes_proc.append(f"Grau inserido: {grau_val}")
                         
                     via_val = str(regra_p.get('Via de Acesso (1, 2 ou EXCLUIR)', '')).strip().upper()
@@ -260,7 +309,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
                             via_elem = ET.Element(ans_tag('viaAcesso'))
                             via_elem.text = via_val
                             proc_exec.append(via_elem)
-                        detalhes_proc.append(f"Via de Acesso adjusted: {via_val}")
+                        detalhes_proc.append(f"Via de Acesso ajustada: {via_val}")
                         
                     tec_val = str(regra_p.get('Técnica (1, 2 ou EXCLUIR)', '')).strip().upper()
                     tec_elem = proc_exec.find('ans:tecnica', NS)
@@ -278,13 +327,12 @@ def processar_xml_tiss(arquivo_xml, dfs):
                     if detalhes_proc: 
                         auditoria['procedimentos_ajustados'].append(f"Proc {cod_p}: " + " | ".join(detalhes_proc))
 
-                # --- REGRAS DOS MÉDICOS (CBO, Código Operadora) ---
+                # Ajustes de CBO e Código na Operadora para médicos cadastrados
                 for eq in equipes_restantes:
                     nome_prof_elem = eq.find('.//ans:nomeProf', NS)
                     nome_prof = nome_prof_elem.text.strip().upper() if nome_prof_elem is not None and nome_prof_elem.text else ""
                     
-                    if nome_prof in set_conveniados:
-                        continue 
+                    if nome_prof in set_conveniados: continue 
                     
                     cbo_elem = eq.find('.//ans:CBOS', NS)
                     if nome_prof in dict_medicos:
@@ -315,7 +363,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
             for p in procs_para_remover:
                 procs_container.remove(p)
 
-        # --- DESPESAS EXTRAS ---
+        # --- OUTRAS DESPESAS ---
         despesas_container = guia.find('.//ans:outrasDespesas', NS)
         if despesas_container is not None:
             for despesa in despesas_container.findall('ans:despesa', NS):
@@ -341,8 +389,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
                     if cod_item in dict_unidades:
                         unidade_elem = servicos.find('ans:unidadeMedida', NS)
                         val_unidade = dict_unidades[cod_item].zfill(3) if dict_unidades[cod_item].isdigit() else dict_unidades[cod_item]
-                        if unidade_elem is not None: 
-                            unidade_elem.text = val_unidade
+                        if unidade_elem is not None: unidade_elem.text = val_unidade
                         else:
                             unidade_elem = ET.Element(ans_tag('unidadeMedida'))
                             unidade_elem.text = val_unidade
@@ -362,7 +409,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
                             if add_ref: detalhes_anv.append(f"Ref {ref_alvo}")
                             auditoria['anvisa'].append(f"Item {cod_item}: Inserido " + " e ".join(detalhes_anv))
 
-    # --- LIMPEZA DO HASH E EXPORTAÇÃO ---
+    # --- RECALCULO DE HASH MD5 ---
     hash_node = root.find('.//ans:hash', NS)
     if hash_node is not None: hash_node.text = ""
 

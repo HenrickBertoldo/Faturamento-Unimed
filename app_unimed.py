@@ -43,7 +43,7 @@ def limpar_numero(valor):
 # ==========================================
 tabelas_padrao = {
     'medicos': pd.DataFrame(columns=['Nome do Médico', 'CBO Correto', 'Substituir por Cód. Operadora', 'Código na Operadora']),
-    'troca_medicos': pd.DataFrame(columns=['Médico Original (Incorreto)', 'Médico Substituto (Correto)']),
+    'troca_medicos': pd.DataFrame(columns=['Médico Original (Incorreto)', 'CRM Original', 'Médico Substituto (Correto)', 'CRM Substituto']),
     'procedimentos': pd.DataFrame(columns=['Código do Procedimento', 'Grau Part Obrigatório', 'Via de Acesso (1, 2 ou EXCLUIR)', 'Técnica (1, 2 ou EXCLUIR)']),
     'conveniados': pd.DataFrame(columns=['Nome do Médico Conveniado']),
     'blindagem': pd.DataFrame(columns=['Código Prestador Protegido']),
@@ -136,13 +136,17 @@ def processar_xml_tiss(arquivo_xml, dfs):
     
     dict_medicos = {str(r['Nome do Médico']).strip().upper(): r for _, r in dfs['medicos'].iterrows()}
     
-    # Dicionário de troca de médicos
+    # Dicionário estruturado para mapear a substituição de Nome e CRM
     dict_troca = {}
     for _, r in dfs['troca_medicos'].iterrows():
         orig = str(r['Médico Original (Incorreto)']).strip().upper()
         sub = str(r['Médico Substituto (Correto)']).strip().upper()
+        crm_sub = limpar_numero(r['CRM Substituto'])
         if orig and orig != 'NAN':
-            dict_troca[orig] = sub if sub != 'NAN' else ""
+            dict_troca[orig] = {
+                'nome_novo': sub if sub != 'NAN' else "",
+                'crm_novo': crm_sub
+            }
 
     set_conveniados = set(dfs['conveniados']['Nome do Médico Conveniado'].str.strip().str.upper().dropna())
     set_blindagem = set(dfs['blindagem']['Código Prestador Protegido'].apply(limpar_numero).dropna())
@@ -151,7 +155,6 @@ def processar_xml_tiss(arquivo_xml, dfs):
     dict_anvisa = {padronizar_codigo_8_digitos(r['Código do Item']): r for _, r in dfs['anvisa'].iterrows() if pd.notna(r['Código do Item'])}
     dict_procedimentos = {padronizar_codigo_8_digitos(r['Código do Procedimento']): r for _, r in dfs['procedimentos'].iterrows() if pd.notna(r['Código do Procedimento'])}
 
-    # Mapear tanto guias de internação quanto SADT
     guias_int = [(g, 'internacao') for g in root.findall('.//ans:guiaResumoInternacao', NS)]
     guias_sadt = [(g, 'sadt') for g in root.findall('.//ans:guiaSP-SADT', NS)]
     todas_guias = guias_int + guias_sadt
@@ -163,7 +166,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
             auditoria['guias_blindadas'].append(f"Guia ignorada (Prestador {limpar_numero(prestador_elem.text)} protegido)")
             continue
 
-        # VALIDAÇÃO DA CARTEIRINHA 0014 (Apenas para Internação, pois SADT sempre pula regra de conveniado)
+        # VALIDAÇÃO DA CARTEIRINHA 0014 (SADT ignora exclusão de conveniado de forma nativa)
         eh_unimed_0014 = False
         if tipo_guia == 'internacao':
             carteira_elem = guia.find('.//ans:dadosBeneficiario/ans:numeroCarteira', NS)
@@ -186,16 +189,30 @@ def processar_xml_tiss(arquivo_xml, dfs):
                     nome_prof_elem = eq.find('.//ans:nomeProf', NS)
                     nome_prof = nome_prof_elem.text.strip().upper() if nome_prof_elem is not None and nome_prof_elem.text else ""
                     
-                    # --- NOVA REGRA: TROCA DE MÉDICOS ---
+                    # --- REGRA: TROCA DE MÉDICOS E CRM ---
                     if nome_prof in dict_troca:
-                        nome_novo = dict_troca[nome_prof]
-                        if nome_prof_elem is not None:
+                        nome_novo = dict_troca[nome_prof]['nome_novo']
+                        crm_novo = dict_troca[nome_prof]['crm_novo']
+                        
+                        if nome_prof_elem is not None and nome_novo:
                             nome_prof_elem.text = nome_novo
-                        auditoria['medicos_trocados'].append(f"Guia {tipo_guia.upper()}: '{nome_prof}' substituído por '{nome_novo}'")
-                        nome_prof = nome_novo  # Atualiza a variável para as próximas regras
+                        
+                        # Altera o CRM na tag correta dentro do profissional
+                        if crm_novo:
+                            cod_prof_elem = eq.find('.//ans:codProfissional', NS)
+                            if cod_prof_elem is not None:
+                                crm_elem = cod_prof_elem.find('ans:numeroConselhoProfissional', NS)
+                                if crm_elem is not None:
+                                    crm_elem.text = crm_novo
+                                else:
+                                    crm_elem = ET.Element(ans_tag('numeroConselhoProfissional'))
+                                    crm_elem.text = crm_novo
+                                    cod_prof_elem.append(crm_elem)
+                                    
+                        auditoria['medicos_trocados'].append(f"Guia {tipo_guia.upper()}: '{nome_prof}' trocado por '{nome_novo}' (CRM Novo: {crm_novo})")
+                        nome_prof = nome_novo  # Atualiza a referência local para as próximas regras
                     
                     # --- TRATAMENTO DE MÉDICOS CONVENIADOS ---
-                    # Só remove se for Internação E a carteira for 0014 E o médico for conveniado
                     if tipo_guia == 'internacao' and eh_unimed_0014 and nome_prof in set_conveniados:
                         if not is_protected:
                             equipes_remover.append(eq)
@@ -243,7 +260,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
                             via_elem = ET.Element(ans_tag('viaAcesso'))
                             via_elem.text = via_val
                             proc_exec.append(via_elem)
-                        detalhes_proc.append(f"Via de Acesso ajustada: {via_val}")
+                        detalhes_proc.append(f"Via de Acesso adjusted: {via_val}")
                         
                     tec_val = str(regra_p.get('Técnica (1, 2 ou EXCLUIR)', '')).strip().upper()
                     tec_elem = proc_exec.find('ans:tecnica', NS)
@@ -298,7 +315,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
             for p in procs_para_remover:
                 procs_container.remove(p)
 
-        # --- DESPESAS EXTRAS (Itens, Oxigênio, Unidades, ANVISA) ---
+        # --- DESPESAS EXTRAS ---
         despesas_container = guia.find('.//ans:outrasDespesas', NS)
         if despesas_container is not None:
             for despesa in despesas_container.findall('ans:despesa', NS):
@@ -375,7 +392,9 @@ config_texto_colunas = {
     "Registro ANVISA": st.column_config.TextColumn("Reg. ANVISA"),
     "Ref. Fabricante": st.column_config.TextColumn("Ref. Fab."),
     "Médico Original (Incorreto)": st.column_config.TextColumn("Nome Sem Cadastro"),
-    "Médico Substituto (Correto)": st.column_config.TextColumn("Nome Substituto")
+    "CRM Original": st.column_config.TextColumn("CRM Orig. (Opcional)"),
+    "Médico Substituto (Correto)": st.column_config.TextColumn("Nome Substituto"),
+    "CRM Substituto": st.column_config.TextColumn("CRM Substituto")
 }
 
 with st.container(border=True):
@@ -451,7 +470,7 @@ with col2:
             with st.expander("🔎 Ver Detalhes das Alterações"):
                 tem_alteracao = False
                 titulos_amigaveis = {
-                    'medicos_trocados': '🔀 Médicos Substituídos (Nomes)',
+                    'medicos_trocados': '🔀 Médicos e CRMs Substituídos',
                     'cbos': '👩‍⚕️ Médicos e CBOs Alterados',
                     'itens': '🔄 Itens e Medicamentos Traduzidos',
                     'anvisa': '🩺 Registros ANVISA Inseridos',

@@ -43,6 +43,7 @@ def limpar_numero(valor):
 # ==========================================
 tabelas_padrao = {
     'medicos': pd.DataFrame(columns=['Nome do Médico', 'CBO Correto', 'Substituir por Cód. Operadora', 'Código na Operadora']),
+    'troca_medicos': pd.DataFrame(columns=['Médico Original (Incorreto)', 'Médico Substituto (Correto)']),
     'procedimentos': pd.DataFrame(columns=['Código do Procedimento', 'Grau Part Obrigatório', 'Via de Acesso (1, 2 ou EXCLUIR)', 'Técnica (1, 2 ou EXCLUIR)']),
     'conveniados': pd.DataFrame(columns=['Nome do Médico Conveniado']),
     'blindagem': pd.DataFrame(columns=['Código Prestador Protegido']),
@@ -127,13 +128,22 @@ def padronizar_codigo_8_digitos(cod):
 
 def processar_xml_tiss(arquivo_xml, dfs):
     auditoria = { 
-        'cbos': [], 'itens': [], 'anvisa': [], 'unidades': [], 'oxigenio': [],
+        'cbos': [], 'medicos_trocados': [], 'itens': [], 'anvisa': [], 'unidades': [], 'oxigenio': [],
         'conveniados_excluidos': [], 'procedimentos_ajustados': [], 'guias_blindadas': [] 
     }
     tree = ET.parse(arquivo_xml)
     root = tree.getroot()
     
     dict_medicos = {str(r['Nome do Médico']).strip().upper(): r for _, r in dfs['medicos'].iterrows()}
+    
+    # Dicionário de troca de médicos
+    dict_troca = {}
+    for _, r in dfs['troca_medicos'].iterrows():
+        orig = str(r['Médico Original (Incorreto)']).strip().upper()
+        sub = str(r['Médico Substituto (Correto)']).strip().upper()
+        if orig and orig != 'NAN':
+            dict_troca[orig] = sub if sub != 'NAN' else ""
+
     set_conveniados = set(dfs['conveniados']['Nome do Médico Conveniado'].str.strip().str.upper().dropna())
     set_blindagem = set(dfs['blindagem']['Código Prestador Protegido'].apply(limpar_numero).dropna())
     dict_itens = {padronizar_codigo_8_digitos(k): padronizar_codigo_8_digitos(v) for k, v in zip(dfs['itens']['Código Incorreto'], dfs['itens']['Código Correto']) if pd.notna(k)}
@@ -141,17 +151,24 @@ def processar_xml_tiss(arquivo_xml, dfs):
     dict_anvisa = {padronizar_codigo_8_digitos(r['Código do Item']): r for _, r in dfs['anvisa'].iterrows() if pd.notna(r['Código do Item'])}
     dict_procedimentos = {padronizar_codigo_8_digitos(r['Código do Procedimento']): r for _, r in dfs['procedimentos'].iterrows() if pd.notna(r['Código do Procedimento'])}
 
-    for guia in root.findall('.//ans:guiaResumoInternacao', NS):
+    # Mapear tanto guias de internação quanto SADT
+    guias_int = [(g, 'internacao') for g in root.findall('.//ans:guiaResumoInternacao', NS)]
+    guias_sadt = [(g, 'sadt') for g in root.findall('.//ans:guiaSP-SADT', NS)]
+    todas_guias = guias_int + guias_sadt
+
+    for guia, tipo_guia in todas_guias:
         
         prestador_elem = guia.find('.//ans:dadosPrestador/ans:codigoPrestadorNaOperadora', NS) or guia.find('.//ans:dadosContratado/ans:codigoPrestadorNaOperadora', NS)
         if prestador_elem is not None and limpar_numero(prestador_elem.text) in set_blindagem:
             auditoria['guias_blindadas'].append(f"Guia ignorada (Prestador {limpar_numero(prestador_elem.text)} protegido)")
             continue
 
-        # --- NOVA REGRA: VALIDAÇÃO DA CARTEIRINHA 0014 ---
-        carteira_elem = guia.find('.//ans:dadosBeneficiario/ans:numeroCarteira', NS)
-        numero_carteira = limpar_numero(carteira_elem.text) if carteira_elem is not None and carteira_elem.text else ""
-        eh_unimed_0014 = numero_carteira.startswith('0014')
+        # VALIDAÇÃO DA CARTEIRINHA 0014 (Apenas para Internação, pois SADT sempre pula regra de conveniado)
+        eh_unimed_0014 = False
+        if tipo_guia == 'internacao':
+            carteira_elem = guia.find('.//ans:dadosBeneficiario/ans:numeroCarteira', NS)
+            numero_carteira = limpar_numero(carteira_elem.text) if carteira_elem is not None and carteira_elem.text else ""
+            eh_unimed_0014 = numero_carteira.startswith('0014')
             
         procs_container = guia.find('.//ans:procedimentosExecutados', NS)
         if procs_container is not None:
@@ -161,7 +178,6 @@ def processar_xml_tiss(arquivo_xml, dfs):
                 cod_proc_elem = proc_exec.find('.//ans:codigoProcedimento', NS)
                 cod_p = padronizar_codigo_8_digitos(cod_proc_elem.text) if cod_proc_elem is not None and cod_proc_elem.text else ""
                 
-                # --- 1. TRATAMENTO DE MÉDICOS CONVENIADOS E EQUIPES MISTAS ---
                 is_protected = cod_p.startswith(('4', '2', '04', '02'))
                 equipes_iniciais = proc_exec.findall('ans:identEquipe', NS)
                 equipes_remover = []
@@ -170,30 +186,37 @@ def processar_xml_tiss(arquivo_xml, dfs):
                     nome_prof_elem = eq.find('.//ans:nomeProf', NS)
                     nome_prof = nome_prof_elem.text.strip().upper() if nome_prof_elem is not None and nome_prof_elem.text else ""
                     
-                    # A exclusão agora depende de eh_unimed_0014 ser True
-                    if eh_unimed_0014 and nome_prof in set_conveniados:
+                    # --- NOVA REGRA: TROCA DE MÉDICOS ---
+                    if nome_prof in dict_troca:
+                        nome_novo = dict_troca[nome_prof]
+                        if nome_prof_elem is not None:
+                            nome_prof_elem.text = nome_novo
+                        auditoria['medicos_trocados'].append(f"Guia {tipo_guia.upper()}: '{nome_prof}' substituído por '{nome_novo}'")
+                        nome_prof = nome_novo  # Atualiza a variável para as próximas regras
+                    
+                    # --- TRATAMENTO DE MÉDICOS CONVENIADOS ---
+                    # Só remove se for Internação E a carteira for 0014 E o médico for conveniado
+                    if tipo_guia == 'internacao' and eh_unimed_0014 and nome_prof in set_conveniados:
                         if not is_protected:
                             equipes_remover.append(eq)
                             auditoria['conveniados_excluidos'].append(f"Removido médico(a) '{nome_prof}' do procedimento {cod_p} (Carteira: {numero_carteira})")
                 
-                # Remove apenas a equipe do médico conveniado (mantém os outros)
                 for eq in equipes_remover:
                     proc_exec.remove(eq)
                 
-                # Se o procedimento tinha equipe, mas TODOS eram conveniados e foram removidos, remove o procedimento inteiro
                 equipes_restantes = proc_exec.findall('ans:identEquipe', NS)
                 if len(equipes_iniciais) > 0 and len(equipes_restantes) == 0:
                     procs_para_remover.append(proc_exec)
-                    continue # Pula para o próximo procedimento
+                    continue 
                 
-                # --- 2. REGRAS DOS PROCEDIMENTOS (GrauPart, Via, Tecnica) ---
+                # --- REGRAS DOS PROCEDIMENTOS (GrauPart, Via, Tecnica) ---
                 if cod_p in dict_procedimentos:
                     regra_p = dict_procedimentos[cod_p]
                     detalhes_proc = []
                     
                     grau_val = limpar_numero(regra_p.get('Grau Part Obrigatório', ''))
                     if grau_val:
-                        for eq in equipes_restantes: # Aplica grau apenas em quem sobrou na equipe
+                        for eq in equipes_restantes:
                             ident_eq = eq.find('ans:identificacaoEquipe', NS)
                             if ident_eq is not None:
                                 grau_elem = ident_eq.find('ans:grauPart', NS)
@@ -204,7 +227,6 @@ def processar_xml_tiss(arquivo_xml, dfs):
                                     grau_elem.text = grau_val
                                     ident_eq.insert(0, grau_elem)
                                 
-                            # Limpeza de resíduos de testes anteriores
                             bad_grau = eq.find('ans:grauParticipacao', NS)
                             if bad_grau is not None:
                                 eq.remove(bad_grau)
@@ -239,7 +261,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
                     if detalhes_proc: 
                         auditoria['procedimentos_ajustados'].append(f"Proc {cod_p}: " + " | ".join(detalhes_proc))
 
-                # --- 3. REGRAS DOS MÉDICOS (CBO, Código Operadora) ---
+                # --- REGRAS DOS MÉDICOS (CBO, Código Operadora) ---
                 for eq in equipes_restantes:
                     nome_prof_elem = eq.find('.//ans:nomeProf', NS)
                     nome_prof = nome_prof_elem.text.strip().upper() if nome_prof_elem is not None and nome_prof_elem.text else ""
@@ -276,7 +298,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
             for p in procs_para_remover:
                 procs_container.remove(p)
 
-        # --- 4. DESPESAS EXTRAS (Itens, Oxigênio, Unidades, ANVISA) ---
+        # --- DESPESAS EXTRAS (Itens, Oxigênio, Unidades, ANVISA) ---
         despesas_container = guia.find('.//ans:outrasDespesas', NS)
         if despesas_container is not None:
             for despesa in despesas_container.findall('ans:despesa', NS):
@@ -323,7 +345,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
                             if add_ref: detalhes_anv.append(f"Ref {ref_alvo}")
                             auditoria['anvisa'].append(f"Item {cod_item}: Inserido " + " e ".join(detalhes_anv))
 
-    # --- 5. LIMPEZA DO HASH E EXPORTAÇÃO ---
+    # --- LIMPEZA DO HASH E EXPORTAÇÃO ---
     hash_node = root.find('.//ans:hash', NS)
     if hash_node is not None: hash_node.text = ""
 
@@ -351,7 +373,9 @@ config_texto_colunas = {
     "Código Prestador Protegido": st.column_config.TextColumn("Cód. Protegido"),
     "Unidade de Medida Correta": st.column_config.TextColumn("Nova Unidade"),
     "Registro ANVISA": st.column_config.TextColumn("Reg. ANVISA"),
-    "Ref. Fabricante": st.column_config.TextColumn("Ref. Fab.")
+    "Ref. Fabricante": st.column_config.TextColumn("Ref. Fab."),
+    "Médico Original (Incorreto)": st.column_config.TextColumn("Nome Sem Cadastro"),
+    "Médico Substituto (Correto)": st.column_config.TextColumn("Nome Substituto")
 }
 
 with st.container(border=True):
@@ -410,22 +434,24 @@ with col2:
             st.markdown("### 📊 Resultado da Auditoria")
             
             c1, c2, c3 = st.columns(3)
-            c1.metric("👩‍⚕️ CBOs / Códs", len(aud['cbos']))
-            c2.metric("🔄 Itens Traduzidos", len(aud['itens']))
-            c3.metric("🩺 Itens ANVISA", len(aud['anvisa']))
+            c1.metric("🔀 Médicos Trocados", len(aud['medicos_trocados']))
+            c2.metric("👩‍⚕️ CBOs / Códs", len(aud['cbos']))
+            c3.metric("🤝 Conveniados Remov.", len(aud['conveniados_excluidos']))
             
             c4, c5, c6 = st.columns(3)
-            c4.metric("📦 Unid. Medida", len(aud['unidades']))
-            c5.metric("⏱️ Tempos O²", len(aud['oxigenio']))
-            c6.metric("🤝 Procs. Conveniados Removidos", len(aud['conveniados_excluidos']))
+            c4.metric("🔄 Itens Traduzidos", len(aud['itens']))
+            c5.metric("📦 Unid. Medida", len(aud['unidades']))
+            c6.metric("⏱️ Tempos O²", len(aud['oxigenio']))
 
-            c7, c8, _ = st.columns(3)
+            c7, c8, c9 = st.columns(3)
             c7.metric("⚙️ Procs. Ajustados", len(aud['procedimentos_ajustados']))
-            c8.metric("🛡️ Guia(s) Blindada(s)", len(aud['guias_blindadas']))
+            c8.metric("🩺 Itens ANVISA", len(aud['anvisa']))
+            c9.metric("🛡️ Guia(s) Blindada(s)", len(aud['guias_blindadas']))
             
             with st.expander("🔎 Ver Detalhes das Alterações"):
                 tem_alteracao = False
                 titulos_amigaveis = {
+                    'medicos_trocados': '🔀 Médicos Substituídos (Nomes)',
                     'cbos': '👩‍⚕️ Médicos e CBOs Alterados',
                     'itens': '🔄 Itens e Medicamentos Traduzidos',
                     'anvisa': '🩺 Registros ANVISA Inseridos',
@@ -502,7 +528,8 @@ with st.container(border=True):
     st.markdown("### 🛠️ Parametrização e Regras de Negócio")
     
     abas = st.tabs([
-        "👩‍⚕️ Médicos e CBO", 
+        "🔀 Troca de Médicos",
+        "👩‍⚕️ CBO e Cód Operadora", 
         "⚙️ Procedimentos", 
         "🤝 Médicos Conveniados", 
         "🛡️ Blindagem", 
@@ -511,7 +538,7 @@ with st.container(border=True):
         "🏥 Registro ANVISA"
     ])
 
-    tabelas_nomes = ['medicos', 'procedimentos', 'conveniados', 'blindagem', 'itens', 'unidades', 'anvisa']
+    tabelas_nomes = ['troca_medicos', 'medicos', 'procedimentos', 'conveniados', 'blindagem', 'itens', 'unidades', 'anvisa']
     
     for i, aba_nome in enumerate(tabelas_nomes):
         with abas[i]:

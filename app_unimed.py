@@ -57,8 +57,13 @@ def formatar_tabela_padrao(df):
     for col in df.columns:
         df[col] = df[col].astype(str).str.strip().str.upper()
         df[col] = df[col].replace(['NAN', 'NONE', '<NA>'], '')
+        
+        # 🌟 CORREÇÃO: Força 2 dígitos com zero à esquerda para colunas específicas
+        col_upper = col.upper()
+        if any(k in col_upper for k in ['CONSELHO', 'UF', 'GRAU PART', 'VIA DE ACESSO', 'TÉCNICA']):
+            df[col] = df[col].apply(lambda x: x.zfill(2) if (x.isdigit() and len(x) == 1) else x)
+            
     return df
-
 def carregar_do_sheets(silencioso=False):
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)

@@ -39,11 +39,10 @@ def limpar_numero(valor):
     return v
 
 # ==========================================
-# ESTRUTURA PADRÃO DAS TABELAS (INCLUINDO NOVA REGRA SADT)
+# ESTRUTURA PADRÃO DAS TABELAS
 # ==========================================
 tabelas_padrao = {
     'troca_equipe_sadt': pd.DataFrame(columns=['Nome Original (Erro)', 'Nome Novo', 'CRM Novo', 'CBO Novo', 'Cód Operadora Novo', 'Grau Part Novo', 'Conselho Novo', 'UF Nova']),
-    'troca_medicos': pd.DataFrame(columns=['Médico Original (Incorreto)', 'CRM Original', 'Médico Substituto (Correto)', 'CRM Substituto']),
     'medicos': pd.DataFrame(columns=['Nome do Médico', 'CBO Correto', 'Substituir por Cód. Operadora', 'Código na Operadora']),
     'procedimentos': pd.DataFrame(columns=['Código do Procedimento', 'Grau Part Obrigatório', 'Via de Acesso (1, 2 ou EXCLUIR)', 'Técnica (1, 2 ou EXCLUIR)']),
     'conveniados': pd.DataFrame(columns=['Nome do Médico Conveniado']),
@@ -64,6 +63,7 @@ def formatar_tabela_padrao(df):
             df[col] = df[col].apply(lambda x: x.zfill(2) if (x.isdigit() and len(x) == 1) else x)
             
     return df
+
 def carregar_do_sheets(silencioso=False):
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
@@ -142,15 +142,6 @@ def processar_xml_tiss(arquivo_xml, dfs):
     
     dict_medicos = {str(r['Nome do Médico']).strip().upper(): r for _, r in dfs['medicos'].iterrows()}
     
-    # Mapeamento para troca global de médicos
-    dict_troca = {}
-    for _, r in dfs['troca_medicos'].iterrows():
-        orig = str(r['Médico Original (Incorreto)']).strip().upper()
-        sub = str(r['Médico Substituto (Correto)']).strip().upper()
-        crm_sub = limpar_numero(r['CRM Substituto'])
-        if orig and orig != 'NAN' and orig != '':
-            dict_troca[orig] = {'nome_novo': sub if (sub != 'NAN' and sub != '') else orig, 'crm_novo': crm_sub}
-
     # 🔄 MAPEAMENTO EXCLUSIVO PARA TROCA DE EQUIPE COMPLETA EM SADT
     dict_equipe_sadt = {}
     if 'troca_equipe_sadt' in dfs:
@@ -260,61 +251,6 @@ def processar_xml_tiss(arquivo_xml, dfs):
                                 
                         auditoria['medicos_trocados'].append(f"Guia SADT (Equipe Completa): Mapeamento de '{nome_orig_xml}' substituído com sucesso.")
 
-        # =========================================================================
-        # REGRAS GERAIS DE OUTRAS GUIAIS (INTERNAÇÃO / ADICIONAIS)
-        # =========================================================================
-        for ident_eq in guia.findall('.//ans:identificacaoEquipe', NS):
-            nome_prof_elem = ident_eq.find('ans:nomeProf', NS)
-            if nome_prof_elem is not None and nome_prof_elem.text:
-                nome_prof = nome_prof_elem.text.strip().upper()
-                if nome_prof in dict_troca:
-                    nome_novo = dict_troca[nome_prof]['nome_novo']
-                    crm_novo = dict_troca[nome_prof]['crm_novo']
-                    if nome_novo: nome_prof_elem.text = nome_novo
-                    if crm_novo:
-                        crm_elem = ident_eq.find('ans:numeroConselhoProfissional', NS)
-                        if crm_elem is not None: crm_elem.text = crm_novo
-                        else:
-                            crm_elem = ET.Element(ans_tag('numeroConselhoProfissional'))
-                            crm_elem.text = crm_novo
-                            ident_eq.append(crm_elem)
-                    auditoria['medicos_trocados'].append(f"Guia {tipo_guia.upper()} (Equipe Geral): '{nome_prof}' trocado por '{nome_novo}'")
-
-        # Localização no profissional executante geral da Guia
-        for prof_exec in guia.findall('.//ans:profissionalExecutante', NS):
-            nome_prof_elem = prof_exec.find('ans:nomeProfissional', NS)
-            if nome_prof_elem is not None and nome_prof_elem.text:
-                nome_prof = nome_prof_elem.text.strip().upper()
-                if nome_prof in dict_troca:
-                    nome_novo = dict_troca[nome_prof]['nome_novo']
-                    crm_novo = dict_troca[nome_prof]['crm_novo']
-                    if nome_novo: nome_prof_elem.text = nome_novo
-                    if crm_novo:
-                        crm_elem = prof_exec.find('ans:numeroConselhoProfissional', NS)
-                        if crm_elem is not None: crm_elem.text = crm_novo
-                        else:
-                            crm_elem = ET.Element(ans_tag('numeroConselhoProfissional'))
-                            crm_elem.text = crm_novo
-                            prof_exec.append(crm_elem)
-                    auditoria['medicos_trocados'].append(f"Guia {tipo_guia.upper()} (Executante Geral): '{nome_prof}' trocado por '{nome_novo}'")
-
-        # Localização no médico solicitante
-        for med_sol in guia.findall('.//ans:medicoSolicitante', NS):
-            nome_prof_elem = med_sol.find('ans:nomeMedico', NS)
-            if nome_prof_elem is not None and nome_prof_elem.text:
-                nome_prof = nome_prof_elem.text.strip().upper()
-                if nome_prof in dict_troca:
-                    nome_novo = dict_troca[nome_prof]['nome_novo']
-                    crm_novo = dict_troca[nome_prof]['crm_novo']
-                    if nome_novo: nome_prof_elem.text = nome_novo
-                    if crm_novo:
-                        crm_elem = med_sol.find('ans:numeroConselhoProfissional', NS)
-                        if crm_elem is not None: crm_elem.text = crm_novo
-                        else:
-                            crm_elem = ET.Element(ans_tag('numeroConselhoProfissional'))
-                            crm_elem.text = crm_novo
-                            med_sol.append(crm_elem)
-                    auditoria['medicos_trocados'].append(f"Guia {tipo_guia.upper()} (Solicitante): '{nome_prof}' trocado por '{nome_novo}'")
 
         # =========================================================================
         # REGRAS COMPLEMENTARES DE PROCEDIMENTOS, CBOS E REMOÇÕES
@@ -516,11 +452,7 @@ config_texto_colunas = {
     "Código Prestador Protegido": st.column_config.TextColumn("Cód. Protegido"),
     "Unidade de Medida Correta": st.column_config.TextColumn("Nova Unidade"),
     "Registro ANVISA": st.column_config.TextColumn("Reg. ANVISA"),
-    "Ref. Fabricante": st.column_config.TextColumn("Ref. Fab."),
-    "Médico Original (Incorreto)": st.column_config.TextColumn("Nome Original"),
-    "CRM Original": st.column_config.TextColumn("CRM Original"),
-    "Médico Substituto (Correto)": st.column_config.TextColumn("Nome Substituto"),
-    "CRM Substituto": st.column_config.TextColumn("CRM Substituto")
+    "Ref. Fabricante": st.column_config.TextColumn("Ref. Fab.")
 }
 
 with st.container(border=True):
@@ -667,7 +599,6 @@ with st.container(border=True):
     
     abas = st.tabs([
         "🔄 Equipe SADT (Nova)",
-        "🔀 Troca Geral de Médicos",
         "👩‍⚕️ CBO e Cód Operadora", 
         "⚙️ Procedimentos", 
         "🤝 Médicos Conveniados", 

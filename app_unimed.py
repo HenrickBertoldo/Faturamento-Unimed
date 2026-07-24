@@ -677,7 +677,7 @@ with st.container(border=True):
         "🏥 Registro ANVISA"
     ])
 
-    tabelas_nomes = ['troca_equipe_sadt', 'troca_medicos', 'medicos', 'procedimentos', 'conveniados', 'blindagem', 'itens', 'unidades', 'anvisa']
+    tabelas_nomes = ['troca_equipe_sadt', 'medicos', 'procedimentos', 'conveniados', 'blindagem', 'itens', 'unidades', 'anvisa']
     
     for i, aba_nome in enumerate(tabelas_nomes):
         with abas[i]:

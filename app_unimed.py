@@ -1,4 +1,7 @@
 import hashlib
+import re
+import zipfile
+import traceback
 import streamlit as st
 import xml.etree.ElementTree as ET
 import pandas as pd
@@ -76,7 +79,10 @@ def carregar_do_sheets(silencioso=False):
                 st.session_state[f'tab_{aba}'] = tabelas_padrao[aba]
         if not silencioso: st.toast("✅ Regras sincronizadas da nuvem!", icon="☁️")
     except Exception as e:
-        if not silencioso: st.error(f"Erro na conexão: {e}")
+        if not silencioso:
+            st.error(f"Erro na conexão com o Google Sheets: {e}")
+            with st.expander("🔍 Detalhes técnicos do erro"):
+                st.code(traceback.format_exc())
         for aba in tabelas_padrao.keys():
             if f'tab_{aba}' not in st.session_state: st.session_state[f'tab_{aba}'] = tabelas_padrao[aba]
 
@@ -90,7 +96,9 @@ def salvar_no_sheets():
                 conn.update(worksheet=aba, data=df_atual)
         st.toast("✅ Alterações gravadas na nuvem!", icon="💾")
     except Exception as e:
-        st.error(f"Erro ao salvar: {e}")
+        st.error(f"Erro ao salvar no Google Sheets: {e}")
+        with st.expander("🔍 Detalhes técnicos do erro"):
+            st.code(traceback.format_exc())
 
 if "app_inicializado" not in st.session_state:
     with st.spinner("Conectando à base de dados..."): carregar_do_sheets(silencioso=True)
@@ -100,13 +108,17 @@ if "app_inicializado" not in st.session_state:
 # MOTOR DE CORREÇÃO DO XML REVISADO 
 # ==========================================
 def calcular_tempo_oxigenio(hora_ini_str, qtd_executada, tipo_unidade):
+    """Retorna (hora_calculada, sucesso). Em caso de erro de formato, devolve
+    a hora original e sucesso=False para que o chamador registre a falha na
+    auditoria em vez de mascará-la silenciosamente."""
     try:
         t_ini = datetime.strptime(hora_ini_str.strip(), "%H:%M:%S")
         qtd = float(qtd_executada.strip())
-        if tipo_unidade == '60034335': return (t_ini + timedelta(hours=qtd)).strftime("%H:%M:%S")
-        elif tipo_unidade == '60034343': return (t_ini + timedelta(minutes=qtd)).strftime("%H:%M:%S")
-        return hora_ini_str
-    except: return hora_ini_str
+        if tipo_unidade == '60034335': return (t_ini + timedelta(hours=qtd)).strftime("%H:%M:%S"), True
+        elif tipo_unidade == '60034343': return (t_ini + timedelta(minutes=qtd)).strftime("%H:%M:%S"), True
+        return hora_ini_str, True
+    except (ValueError, AttributeError, TypeError):
+        return hora_ini_str, False
 
 def reordenar_servico_executado(servicos_node, nova_anvisa=None, nova_ref=None):
     valores = {tag_limpa(c): c for c in list(servicos_node)}
@@ -135,7 +147,7 @@ def padronizar_codigo_8_digitos(cod):
 def processar_xml_tiss(arquivo_xml, dfs):
     auditoria = { 
         'cbos': [], 'medicos_trocados': [], 'itens': [], 'anvisa': [], 'unidades': [], 'oxigenio': [],
-        'conveniados_excluidos': [], 'procedimentos_ajustados': [], 'guias_blindadas': [] 
+        'conveniados_excluidos': [], 'procedimentos_ajustados': [], 'guias_blindadas': [], 'erros': []
     }
     tree = ET.parse(arquivo_xml)
     root = tree.getroot()
@@ -169,9 +181,15 @@ def processar_xml_tiss(arquivo_xml, dfs):
     guias_sadt = [(g, 'sadt') for g in root.findall('.//ans:guiaSP-SADT', NS)]
     todas_guias = guias_int + guias_sadt
 
-    for guia, tipo_guia in todas_guias:
-        
-        prestador_elem = guia.find('.//ans:dadosPrestador/ans:codigoPrestadorNaOperadora', NS) or guia.find('.//ans:dadosContratado/ans:codigoPrestadorNaOperadora', NS)
+    for indice_guia, (guia, tipo_guia) in enumerate(todas_guias, start=1):
+      try:
+        # 🛠️ CORREÇÃO: 'or' entre Elements do ElementTree é perigoso — um elemento
+        # sem filhos (como esse, que só tem texto) avalia como False em booleano,
+        # então o 'or' sempre pulava para o segundo find(), mesmo quando o
+        # primeiro existia e estava correto. Trocado por checagem explícita.
+        prestador_elem = guia.find('.//ans:dadosPrestador/ans:codigoPrestadorNaOperadora', NS)
+        if prestador_elem is None:
+            prestador_elem = guia.find('.//ans:dadosContratado/ans:codigoPrestadorNaOperadora', NS)
         if prestador_elem is not None and limpar_numero(prestador_elem.text) in set_blindagem:
             auditoria['guias_blindadas'].append(f"Guia ignorada (Prestador {limpar_numero(prestador_elem.text)} protegido)")
             continue
@@ -389,9 +407,12 @@ def processar_xml_tiss(arquivo_xml, dfs):
                     if cod_item in ['60034335', '60034343']:
                         h_ini, h_fim, qtd_ex = servicos.find('ans:horaInicial', NS), servicos.find('ans:horaFinal', NS), servicos.find('ans:quantidadeExecutada', NS)
                         if h_ini is not None and h_fim is not None and qtd_ex is not None:
-                            h_novo = calcular_tempo_oxigenio(h_ini.text, qtd_ex.text, cod_item)
-                            auditoria['oxigenio'].append(f"Oxigênio {cod_item}: Hora Final recalculada para {h_novo}")
-                            h_fim.text = h_novo
+                            h_novo, ok = calcular_tempo_oxigenio(h_ini.text, qtd_ex.text, cod_item)
+                            if ok:
+                                auditoria['oxigenio'].append(f"Oxigênio {cod_item}: Hora Final recalculada para {h_novo}")
+                                h_fim.text = h_novo
+                            else:
+                                auditoria['erros'].append(f"Item {cod_item}: não foi possível recalcular hora de O² (horaInicial='{h_ini.text}', qtd='{qtd_ex.text}') — mantido valor original")
 
                     if cod_item in dict_unidades:
                         unidade_elem = servicos.find('ans:unidadeMedida', NS)
@@ -416,6 +437,12 @@ def processar_xml_tiss(arquivo_xml, dfs):
                             if add_ref: detalhes_anv.append(f"Ref {ref_alvo}")
                             auditoria['anvisa'].append(f"Item {cod_item}: Inserido " + " e ".join(detalhes_anv))
 
+      except Exception as e:
+        # 🛡️ Uma guia com problema (campo inesperado, formato divergente, etc.)
+        # não derruba mais o processamento do lote inteiro — o erro é
+        # registrado na auditoria e o processamento segue para as próximas guias.
+        auditoria['erros'].append(f"Guia #{indice_guia} ({tipo_guia}): erro ao processar — {e}")
+
     # --- RECALCULO DE HASH MD5 ---
     hash_node = root.find('.//ans:hash', NS)
     if hash_node is not None: hash_node.text = ""
@@ -425,7 +452,14 @@ def processar_xml_tiss(arquivo_xml, dfs):
     xml_bytes = temp_buffer.getvalue()
     xml_bytes = xml_bytes.replace(b"<?xml version='1.0' encoding='ISO-8859-1'?>", b'<?xml version="1.0" encoding="ISO-8859-1"?>')
     xml_bytes = xml_bytes.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
-    
+
+    # 🛠️ CORREÇÃO: quando o texto do nó <ans:hash> é vazio, o serializador do
+    # ElementTree escreve uma tag autofechada (<ans:hash/>) em vez de
+    # <ans:hash></ans:hash>. Isso fazia o replace abaixo nunca encontrar a tag
+    # e o hash final saía vazio. Normalizamos qualquer forma autofechada para
+    # o formato aberto/fechado antes de calcular e inserir o MD5.
+    xml_bytes = re.sub(rb'<ans:hash\s*/>', b'<ans:hash></ans:hash>', xml_bytes)
+
     md5_hash = hashlib.md5(xml_bytes).hexdigest()
     if hash_node is not None: xml_bytes = xml_bytes.replace(b'<ans:hash></ans:hash>', f'<ans:hash>{md5_hash}</ans:hash>'.encode('ISO-8859-1'))
 
@@ -484,111 +518,168 @@ with st.container(border=True):
 
 st.divider()
 
+TITULOS_AMIGAVEIS_AUDITORIA = {
+    'medicos_trocados': '🔀 Médicos e CRMs Substituídos',
+    'cbos': '👩‍⚕️ Médicos e CBOs Alterados',
+    'itens': '🔄 Itens e Medicamentos Traduzidos',
+    'anvisa': '🩺 Registros ANVISA Inseridos',
+    'unidades': '📦 Unidades de Medida Ajustadas',
+    'oxigenio': '⏱️ Tempos de Oxigênio Recalculados',
+    'conveniados_excluidos': '🤝 Médicos Conveniados Removidos',
+    'procedimentos_ajustados': '⚙️ Procedimentos Ajustados (Grau/Via/Técnica)',
+    'guias_blindadas': '🛡️ Guia(s) Blindada(s)',
+    'erros': '⚠️ Avisos e Erros Durante o Processamento'
+}
+
+def botao_copiar_codigo(xml_str, key_sufixo):
+    texto_escaped = xml_str.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
+    html_copiar = f"""
+    <button id="cpBtn_{key_sufixo}" style="
+        width: 100%; background-color: #FFFFFF; color: #1E1E1E; 
+        border: 1px solid #CCCCCC; padding: 10px; border-radius: 6px; 
+        cursor: pointer; font-size: 14px; font-weight: 600;
+        transition: 0.2s; box-shadow: 0px 2px 4px rgba(0,0,0,0.1);
+    " onmouseover="this.style.backgroundColor='#F5F5F5'" onmouseout="this.style.backgroundColor='#FFFFFF'">
+    📋 Copiar Código-Fonte para a Área de Transferência
+    </button>
+    <script>
+    document.getElementById("cpBtn_{key_sufixo}").addEventListener("click", () => {{
+        navigator.clipboard.writeText(`{texto_escaped}`).then(() => {{
+            let b = document.getElementById("cpBtn_{key_sufixo}");
+            b.innerText = "✅ Código-Fonte Copiado!";
+            b.style.backgroundColor = "#D4EDDA";
+            b.style.color = "#155724";
+            b.style.borderColor = "#C3E6CB";
+            setTimeout(() => {{ 
+                b.innerText = "📋 Copiar Código-Fonte para a Área de Transferência"; 
+                b.style.backgroundColor = "#FFFFFF";
+                b.style.color = "#1E1E1E";
+                b.style.borderColor = "#CCCCCC";
+            }}, 3000);
+        }});
+    }});
+    </script>
+    """
+    components.html(html_copiar, height=50)
+
 col1, col2 = st.columns([1, 1.2], gap="large")
 
 with col1:
     with st.container(border=True):
         st.markdown("### 📜 Processamento do Lote XML")
-        st.markdown("Arraste o arquivo XML gerado pelo seu sistema aqui.")
-        xml_up = st.file_uploader("Arraste o arquivo XML", type=['xml'], label_visibility="collapsed")
-        
+        st.markdown("Arraste um ou vários arquivos XML gerados pelo seu sistema aqui.")
+        xml_up = st.file_uploader(
+            "Arraste os arquivos XML", type=['xml'], label_visibility="collapsed",
+            accept_multiple_files=True
+        )
+
         if xml_up:
+            st.caption(f"{len(xml_up)} arquivo(s) selecionado(s).")
             if st.button("🚀 Iniciar Correção Automática", type="primary", use_container_width=True):
-                try:
-                    dfs_atuais = {k: st.session_state[f'tab_{k}'] for k in tabelas_padrao.keys()}
-                    xml_resultado, auditoria = processar_xml_tiss(xml_up, dfs_atuais)
-                    st.session_state['xml_processado'] = xml_resultado
-                    st.session_state['auditoria_atual'] = auditoria
-                    st.session_state['nome_arquivo_original'] = xml_up.name
-                except Exception as e:
-                    st.error(f"Falha ao processar: {e}")
+                dfs_atuais = {k: st.session_state[f'tab_{k}'] for k in tabelas_padrao.keys()}
+                resultados_lote = []
+                barra = st.progress(0.0, text="Processando arquivos...")
+                for i, arquivo in enumerate(xml_up):
+                    resultado = {'nome': arquivo.name, 'xml_bytes': None, 'auditoria': None, 'falha_total': None}
+                    try:
+                        xml_resultado, auditoria = processar_xml_tiss(arquivo, dfs_atuais)
+                        resultado['xml_bytes'] = xml_resultado
+                        resultado['auditoria'] = auditoria
+                    except Exception as e:
+                        # Falha ao nível do arquivo inteiro (ex: XML mal formado) —
+                        # não impede que os demais arquivos do lote sejam processados.
+                        resultado['falha_total'] = str(e)
+                    resultados_lote.append(resultado)
+                    barra.progress((i + 1) / len(xml_up), text=f"Processando arquivos... ({i+1}/{len(xml_up)})")
+                barra.empty()
+                st.session_state['resultados_lote'] = resultados_lote
 
 with col2:
-    if 'xml_processado' in st.session_state:
-        with st.container(border=True):
-            aud = st.session_state['auditoria_atual']
-            st.markdown("### 📊 Resultado da Auditoria")
-            
-            c1, c2, c3 = st.columns(3)
-            c1.metric("🔀 Médicos Trocados", len(aud['medicos_trocados']))
-            c2.metric("👩‍⚕️ CBOs / Códs", len(aud['cbos']))
-            c3.metric("🤝 Conveniados Remov.", len(aud['conveniados_excluidos']))
-            
-            c4, c5, c6 = st.columns(3)
-            c4.metric("🔄 Itens Traduzidos", len(aud['itens']))
-            c5.metric("📦 Unid. Medida", len(aud['unidades']))
-            c6.metric("⏱️ Tempos O²", len(aud['oxigenio']))
+    if 'resultados_lote' in st.session_state:
+        resultados_lote = st.session_state['resultados_lote']
+        sucesso = [r for r in resultados_lote if r['falha_total'] is None]
+        falhas = [r for r in resultados_lote if r['falha_total'] is not None]
 
-            c7, c8, c9 = st.columns(3)
-            c7.metric("⚙️ Procs. Ajustados", len(aud['procedimentos_ajustados']))
-            c8.metric("🩺 Itens ANVISA", len(aud['anvisa']))
-            c9.metric("🛡️ Guia(s) Blindada(s)", len(aud['guias_blindadas']))
-            
-            with st.expander("🔎 Ver Detalhes das Alterações"):
-                tem_alteracao = False
-                titulos_amigaveis = {
-                    'medicos_trocados': '🔀 Médicos e CRMs Substituídos',
-                    'cbos': '👩‍⚕️ Médicos e CBOs Alterados',
-                    'itens': '🔄 Itens e Medicamentos Traduzidos',
-                    'anvisa': '🩺 Registros ANVISA Inseridos',
-                    'unidades': '📦 Unidades de Medida Ajustadas',
-                    'oxigenio': '⏱️ Tempos de Oxigênio Recalculados',
-                    'conveniados_excluidos': '🤝 Médicos Conveniados Removidos',
-                    'procedimentos_ajustados': '⚙️ Procedimentos Ajustados (Grau/Via/Técnica)',
-                    'guias_blindadas': '🛡️ Guia(s) Blindada(s)'
-                }
-                for chave, lista_logs in aud.items():
-                    if lista_logs:
-                        tem_alteracao = True
-                        st.markdown(f"**{titulos_amigaveis.get(chave, chave)}**")
-                        for item in lista_logs: st.caption(f"• {item}")
-                        st.markdown("---")
-                if not tem_alteracao: st.info("Nenhuma alteração foi realizada neste XML.")
-            
-            st.divider()
-            
-            st.download_button(
-                label="📥 Baixar XML Validado", 
-                data=st.session_state['xml_processado'], 
-                file_name=f"PRONTO_{st.session_state['nome_arquivo_original']}", 
-                mime="application/xml", 
-                type="primary",
-                use_container_width=True
-            )
-            
-            xml_str = st.session_state['xml_processado'].decode('ISO-8859-1')
-            texto_escaped = xml_str.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
-            
-            html_copiar = f"""
-            <button id="cpBtn" style="
-                width: 100%; background-color: #FFFFFF; color: #1E1E1E; 
-                border: 1px solid #CCCCCC; padding: 10px; border-radius: 6px; 
-                cursor: pointer; font-size: 14px; font-weight: 600;
-                transition: 0.2s; box-shadow: 0px 2px 4px rgba(0,0,0,0.1);
-            " onmouseover="this.style.backgroundColor='#F5F5F5'" onmouseout="this.style.backgroundColor='#FFFFFF'">
-            📋 Copiar Código-Fonte para a Área de Transferência
-            </button>
-            <script>
-            document.getElementById("cpBtn").addEventListener("click", () => {{
-                navigator.clipboard.writeText(`{texto_escaped}`).then(() => {{
-                    let b = document.getElementById("cpBtn");
-                    b.innerText = "✅ Código-Fonte Copiado!";
-                    b.style.backgroundColor = "#D4EDDA";
-                    b.style.color = "#155724";
-                    b.style.borderColor = "#C3E6CB";
-                    setTimeout(() => {{ 
-                        b.innerText = "📋 Copiar Código-Fonte para a Área de Transferência"; 
-                        b.style.backgroundColor = "#FFFFFF";
-                        b.style.color = "#1E1E1E";
-                        b.style.borderColor = "#CCCCCC";
-                    }}, 3000);
-                }});
-            }});
-            </script>
-            """
-            components.html(html_copiar, height=50)
-            
-            with st.expander("🔍 Inspecionar Código Visualmente"): st.code(xml_str, language='xml')
+        with st.container(border=True):
+            st.markdown("### 📊 Resultado da Auditoria")
+            st.caption(f"{len(sucesso)} de {len(resultados_lote)} arquivo(s) processado(s) com sucesso.")
+
+            if falhas:
+                with st.expander(f"❌ {len(falhas)} arquivo(s) com falha total no processamento", expanded=True):
+                    for r in falhas:
+                        st.error(f"**{r['nome']}**: {r['falha_total']}")
+
+            if sucesso:
+                # Métricas agregadas de todo o lote
+                aud_total = {chave: [] for chave in TITULOS_AMIGAVEIS_AUDITORIA}
+                for r in sucesso:
+                    for chave, lista in r['auditoria'].items():
+                        aud_total.setdefault(chave, []).extend(lista)
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("🔀 Médicos Trocados", len(aud_total['medicos_trocados']))
+                c2.metric("👩‍⚕️ CBOs / Códs", len(aud_total['cbos']))
+                c3.metric("🤝 Conveniados Remov.", len(aud_total['conveniados_excluidos']))
+
+                c4, c5, c6 = st.columns(3)
+                c4.metric("🔄 Itens Traduzidos", len(aud_total['itens']))
+                c5.metric("📦 Unid. Medida", len(aud_total['unidades']))
+                c6.metric("⏱️ Tempos O²", len(aud_total['oxigenio']))
+
+                c7, c8, c9 = st.columns(3)
+                c7.metric("⚙️ Procs. Ajustados", len(aud_total['procedimentos_ajustados']))
+                c8.metric("🩺 Itens ANVISA", len(aud_total['anvisa']))
+                c9.metric("🛡️ Guia(s) Blindada(s)", len(aud_total['guias_blindadas']))
+
+                if aud_total.get('erros'):
+                    st.warning(f"⚠️ {len(aud_total['erros'])} aviso(s)/erro(s) pontual(is) durante o processamento — veja os detalhes por arquivo abaixo.")
+
+                st.divider()
+
+                # Download em lote (ZIP) quando há mais de um arquivo processado com sucesso
+                if len(sucesso) > 1:
+                    zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+                        for r in sucesso:
+                            zf.writestr(f"PRONTO_{r['nome']}", r['xml_bytes'])
+                    st.download_button(
+                        label=f"📦 Baixar Todos os {len(sucesso)} XMLs Validados (.zip)",
+                        data=zip_buffer.getvalue(),
+                        file_name="lote_tiss_validado.zip",
+                        mime="application/zip",
+                        type="primary",
+                        use_container_width=True
+                    )
+                    st.divider()
+
+                st.markdown("#### 📄 Detalhes por arquivo")
+                for idx, r in enumerate(sucesso):
+                    aud = r['auditoria']
+                    with st.expander(f"**{r['nome']}**"):
+                        tem_alteracao = False
+                        for chave, lista_logs in aud.items():
+                            if lista_logs:
+                                tem_alteracao = True
+                                st.markdown(f"**{TITULOS_AMIGAVEIS_AUDITORIA.get(chave, chave)}**")
+                                for item in lista_logs: st.caption(f"• {item}")
+                                st.markdown("---")
+                        if not tem_alteracao: st.info("Nenhuma alteração foi realizada neste XML.")
+
+                        st.download_button(
+                            label="📥 Baixar XML Validado",
+                            data=r['xml_bytes'],
+                            file_name=f"PRONTO_{r['nome']}",
+                            mime="application/xml",
+                            type="primary",
+                            use_container_width=True,
+                            key=f"download_{idx}_{r['nome']}"
+                        )
+
+                        xml_str = r['xml_bytes'].decode('ISO-8859-1')
+                        botao_copiar_codigo(xml_str, key_sufixo=f"{idx}")
+
+                        with st.expander("🔍 Inspecionar Código Visualmente"):
+                            st.code(xml_str, language='xml')
     else:
         with st.container(border=True): st.info("Aguardando arquivo XML. Faça o upload na coluna ao lado.")
 

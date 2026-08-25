@@ -598,122 +598,88 @@ col1, col2 = st.columns([1, 1.2], gap="large")
 
 with col1:
     with st.container(border=True):
-        st.markdown("### 📜 Processamento do Lote XML")
-        st.markdown("Arraste um ou vários arquivos XML gerados pelo seu sistema aqui.")
+        st.markdown("### 📜 Processamento do XML")
+        st.markdown("Arraste o arquivo XML gerado pelo seu sistema aqui.")
         xml_up = st.file_uploader(
-            "Arraste os arquivos XML", type=['xml'], label_visibility="collapsed",
-            accept_multiple_files=True
+            "Arraste o arquivo XML", type=['xml'], label_visibility="collapsed",
+            accept_multiple_files=False
         )
 
         if xml_up:
-            st.caption(f"{len(xml_up)} arquivo(s) selecionado(s).")
+            st.caption(f"Arquivo selecionado: **{xml_up.name}**")
             if st.button("🚀 Iniciar Correção Automática", type="primary", use_container_width=True):
                 dfs_atuais = {k: st.session_state[f'tab_{k}'] for k in tabelas_padrao.keys()}
                 resultados_lote = []
-                barra = st.progress(0.0, text="Processando arquivos...")
-                for i, arquivo in enumerate(xml_up):
-                    resultado = {'nome': arquivo.name, 'xml_bytes': None, 'auditoria': None, 'falha_total': None}
-                    try:
-                        xml_resultado, auditoria = processar_xml_tiss(arquivo, dfs_atuais)
-                        resultado['xml_bytes'] = xml_resultado
-                        resultado['auditoria'] = auditoria
-                    except Exception as e:
-                        # Falha ao nível do arquivo inteiro (ex: XML mal formado) —
-                        # não impede que os demais arquivos do lote sejam processados.
-                        resultado['falha_total'] = str(e)
-                    resultados_lote.append(resultado)
-                    barra.progress((i + 1) / len(xml_up), text=f"Processando arquivos... ({i+1}/{len(xml_up)})")
-                barra.empty()
+                
+                # Encapsula em uma lista para manter compatibilidade com a exibição de auditoria
+                arquivo = xml_up
+                resultado = {'nome': arquivo.name, 'xml_bytes': None, 'auditoria': None, 'falha_total': None}
+                try:
+                    xml_resultado, auditoria = processar_xml_tiss(arquivo, dfs_atuais)
+                    resultado['xml_bytes'] = xml_resultado
+                    resultado['auditoria'] = auditoria
+                except Exception as e:
+                    resultado['falha_total'] = str(e)
+                
+                resultados_lote.append(resultado)
                 st.session_state['resultados_lote'] = resultados_lote
 
 with col2:
-    if 'resultados_lote' in st.session_state:
-        resultados_lote = st.session_state['resultados_lote']
-        sucesso = [r for r in resultados_lote if r['falha_total'] is None]
-        falhas = [r for r in resultados_lote if r['falha_total'] is not None]
+    if 'resultados_lote' in st.session_state and st.session_state['resultados_lote']:
+        resultado = st.session_state['resultados_lote'][0]
 
         with st.container(border=True):
             st.markdown("### 📊 Resultado da Auditoria")
-            st.caption(f"{len(sucesso)} de {len(resultados_lote)} arquivo(s) processado(s) com sucesso.")
 
-            if falhas:
-                with st.expander(f"❌ {len(falhas)} arquivo(s) com falha total no processamento", expanded=True):
-                    for r in falhas:
-                        st.error(f"**{r['nome']}**: {r['falha_total']}")
+            if resultado.get('falha_total'):
+                st.error(f"❌ **{resultado['nome']}**: {resultado['falha_total']}")
+            else:
+                st.success(f"✅ Arquivo **{resultado['nome']}** processado com sucesso!")
 
-            if sucesso:
-                # Métricas agregadas de todo o lote
-                aud_total = {chave: [] for chave in TITULOS_AMIGAVEIS_AUDITORIA}
-                for r in sucesso:
-                    for chave, lista in r['auditoria'].items():
-                        aud_total.setdefault(chave, []).extend(lista)
+                # Converte bytes para texto tratando a codificação ISO-8859-1 comum em XMLs TISS
+                xml_bytes = resultado['xml_bytes']
+                try:
+                    xml_texto = xml_bytes.decode('ISO-8859-1')
+                except (UnicodeDecodeError, AttributeError):
+                    xml_texto = xml_bytes.decode('utf-8', errors='replace') if isinstance(xml_bytes, bytes) else xml_bytes
 
-                c1, c2, c3 = st.columns(3)
-                c1.metric("🔀 Médicos Trocados", len(aud_total['medicos_trocados']))
-                c2.metric("👩‍⚕️ CBOs / Códs", len(aud_total['cbos']))
-                c3.metric("🤝 Conveniados Remov.", len(aud_total['conveniados_excluidos']))
-
-                c4, c5, c6 = st.columns(3)
-                c4.metric("🔄 Itens Traduzidos", len(aud_total['itens']))
-                c5.metric("📦 Unid. Medida", len(aud_total['unidades']))
-                c6.metric("⏱️ Tempos O²", len(aud_total['oxigenio']))
-
-                c7, c8, c9 = st.columns(3)
-                c7.metric("⚙️ Procs. Ajustados", len(aud_total['procedimentos_ajustados']))
-                c8.metric("🩺 Itens ANVISA", len(aud_total['anvisa']))
-                c9.metric("🛡️ Guia(s) Blindada(s)", len(aud_total['guias_blindadas']))
-
-                if aud_total.get('erros'):
-                    st.warning(f"⚠️ {len(aud_total['erros'])} aviso(s)/erro(s) pontual(is) durante o processamento — veja os detalhes por arquivo abaixo.")
+                # 1. Download Direto
+                st.download_button(
+                    label="📥 Baixar XML Validado",
+                    data=xml_bytes,
+                    file_name=f"PRONTO_{resultado['nome']}",
+                    mime="application/xml",
+                    type="primary",
+                    use_container_width=True
+                )
 
                 st.divider()
 
-                # Download em lote (ZIP) quando há mais de um arquivo processado com sucesso
-                if len(sucesso) > 1:
-                    zip_buffer = io.BytesIO()
-                    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-                        for r in sucesso:
-                            zf.writestr(f"PRONTO_{r['nome']}", r['xml_bytes'])
-                    st.download_button(
-                        label=f"📦 Baixar Todos os {len(sucesso)} XMLs Validados (.zip)",
-                        data=zip_buffer.getvalue(),
-                        file_name="lote_tiss_validado.zip",
-                        mime="application/zip",
-                        type="primary",
-                        use_container_width=True
-                    )
-                    st.divider()
+                # 2. Exibição do XML com botão de cópia nativo
+                st.markdown("#### 📋 Conteúdo do XML Corrigido")
+                st.caption("Passe o mouse no bloco abaixo e clique no ícone de cópia no canto superior direito:")
+                st.code(xml_texto, language='xml', line_numbers=True)
 
-                st.markdown("#### 📄 Detalhes por arquivo")
-                for idx, r in enumerate(sucesso):
-                    aud = r['auditoria']
-                    with st.expander(f"**{r['nome']}**"):
-                        tem_alteracao = False
-                        for chave, lista_logs in aud.items():
-                            if lista_logs:
-                                tem_alteracao = True
-                                st.markdown(f"**{TITULOS_AMIGAVEIS_AUDITORIA.get(chave, chave)}**")
-                                for item in lista_logs: st.caption(f"• {item}")
-                                st.markdown("---")
-                        if not tem_alteracao: st.info("Nenhuma alteração foi realizada neste XML.")
+                st.divider()
 
-                        st.download_button(
-                            label="📥 Baixar XML Validado",
-                            data=r['xml_bytes'],
-                            file_name=f"PRONTO_{r['nome']}",
-                            mime="application/xml",
-                            type="primary",
-                            use_container_width=True,
-                            key=f"download_{idx}_{r['nome']}"
-                        )
+                # 3. Relatório de Modificações sem st.expander
+                st.markdown("#### 📝 Relatório de Modificações")
+                aud = resultado.get('auditoria', {})
+                tem_alteracao = False
 
-                        xml_str = r['xml_bytes'].decode('ISO-8859-1')
-                        botao_copiar_codigo(xml_str, key_sufixo=f"{idx}")
-
-                        with st.expander("🔍 Inspecionar Código Visualmente"):
-                            st.code(xml_str, language='xml')
+                if isinstance(aud, dict):
+                    for chave, lista_logs in aud.items():
+                        if lista_logs:
+                            tem_alteracao = True
+                            st.markdown(f"**{TITULOS_AMIGAVEIS_AUDITORIA.get(chave, chave)}**")
+                            for item in lista_logs:
+                                st.caption(f"• {item}")
+                
+                if not tem_alteracao:
+                    st.info("Nenhuma alteração foi necessária neste XML.")
     else:
-        with st.container(border=True): st.info("Aguardando arquivo XML. Faça o upload na coluna ao lado.")
+        with st.container(border=True):
+            st.info("Aguardando arquivo XML. Faça o upload na coluna ao lado.")
 
 st.markdown("<br>", unsafe_allow_html=True)
 

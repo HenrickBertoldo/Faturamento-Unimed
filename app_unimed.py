@@ -671,30 +671,39 @@ with col1:
         if arquivos_xml:
             st.info(f"📁 **{len(arquivos_xml)}** arquivo(s) selecionado(s).")
 
-        if st.button("🚀 Iniciar Correção Automática", type="primary", use_container_width=True):
-            if arquivos_xml:
-                resultados = []
-                for arq in arquivos_xml:
-                    try:
-                        arq.seek(0)
-                        xml_bytes, aud = processar_xml_tiss(arq, dfs)
-                        resultados.append({
-                            'nome': arq.name,
-                            'xml_bytes': xml_bytes,
-                            'auditoria': aud,
-                            'falha_total': None
-                        })
-                    except Exception as e:
-                        resultados.append({
-                            'nome': arq.name,
-                            'xml_bytes': None,
-                            'auditoria': {},
-                            'falha_total': str(e)
-                        })
-                st.session_state['resultados_lote'] = resultados
-                st.rerun()
-            else:
-                st.warning("Por favor, selecione pelo menos um arquivo XML.")
+     if st.button("🚀 Iniciar Correção Automática", type="primary", use_container_width=True):
+    if arquivos_xml:
+        resultados = []
+        
+        # Busca automaticamente a variável das planilhas/tabelas no seu app
+        dfs_carregados = (
+            st.session_state.get('dfs') or 
+            globals().get('dfs_atuais') or 
+            globals().get('dfs') or 
+            {}
+        )
+
+        for arq in arquivos_xml:
+            try:
+                arq.seek(0)
+                xml_bytes, aud = processar_xml_tiss(arq, dfs_carregados)
+                resultados.append({
+                    'nome': arq.name,
+                    'xml_bytes': xml_bytes,
+                    'auditoria': aud,
+                    'falha_total': None
+                })
+            except Exception as e:
+                resultados.append({
+                    'nome': arq.name,
+                    'xml_bytes': None,
+                    'auditoria': {},
+                    'falha_total': str(e)
+                })
+        st.session_state['resultados_lote'] = resultados
+        st.rerun()
+    else:
+        st.warning("Por favor, selecione pelo menos um arquivo XML.")
 
 with col2:
     if 'resultados_lote' in st.session_state and st.session_state['resultados_lote']:

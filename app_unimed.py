@@ -31,6 +31,36 @@ for k, v in NS.items():
     ET.register_namespace(k, v)
 ET.register_namespace('xsi', 'http://www.w3.org/2001/XMLSchema-instance')
 
+def corrigir_valores_negativos(root, auditoria):
+    """
+    Localiza tags <ans:quantidadeExecutada> e <ans:valorTotal> com valores negativos
+    e remove apenas o sinal de menos (-).
+    """
+    logs = []
+    
+    # Percorre todos os elementos da árvore XML
+    for elem in root.iter():
+        # Extrai apenas o nome da tag, ignorando o namespace
+        tag_nome = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+        
+        if tag_nome in ['quantidadeExecutada', 'valorTotal'] and elem.text:
+            texto_original = elem.text.strip()
+            
+            # Verifica se o valor começa com sinal de negativo
+            if texto_original.startswith('-'):
+                # Remove o sinal de negativo preservando a formatação das casas decimais
+                texto_corrigido = texto_original.lstrip('-')
+                elem.text = texto_corrigido
+                
+                logs.append(f"Tag <{tag_nome}>: {texto_original} ➔ {texto_corrigido}")
+    
+    # Salva os registros na auditoria
+    if 'valores_negativos' not in auditoria:
+        auditoria['valores_negativos'] = []
+    auditoria['valores_negativos'].extend(logs)
+    
+    return len(logs)
+
 def ans_tag(tag_name): return f"{{{NS['ans']}}}{tag_name}"
 def tag_limpa(element): return element.tag.split('}')[-1] if '}' in element.tag else element.tag
 

@@ -181,16 +181,37 @@ def corrigir_valores_negativos(root, auditoria):
     
     return len(logs)
 
+def corrigir_motivo_encerramento(root, auditoria):
+    """
+    Localiza a tag <ans:motivoEncerramento> com valor '11' e altera para '12'.
+    """
+    logs = []
+    
+    for elem in root.iter():
+        tag_nome = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+        
+        if tag_nome == 'motivoEncerramento' and elem.text:
+            if elem.text.strip() == '11':
+                elem.text = '12'
+                logs.append("Tag <motivoEncerramento>: 11 ➔ 12")
+    
+    if 'motivo_encerramento' not in auditoria:
+        auditoria['motivo_encerramento'] = []
+    auditoria['motivo_encerramento'].extend(logs)
+    
+    return len(logs)
+
 def processar_xml_tiss(arquivo_xml, dfs):
     auditoria = { 
         'cbos': [], 'medicos_trocados': [], 'itens': [], 'anvisa': [], 'unidades': [], 'oxigenio': [],
         'conveniados_excluidos': [], 'procedimentos_ajustados': [], 'guias_blindadas': [], 'erros': [],
-        'valores_negativos': []
+        'valores_negativos': []. 'motivo_encerramento': []
         
     }
     tree = ET.parse(arquivo_xml)
     root = tree.getroot()
     corrigir_valores_negativos(root, auditoria)
+    corrigir_motivo_encerramento(root, auditoria)
     
     dict_medicos = {str(r['Nome do Médico']).strip().upper(): r for _, r in dfs['medicos'].iterrows()}
     
@@ -593,7 +614,8 @@ TITULOS_AMIGAVEIS_AUDITORIA = {
     'conveniados_excluidos': '🤝 Médicos Conveniados Removidos',
     'procedimentos_ajustados': '⚙️ Procedimentos Ajustados (Grau/Via/Técnica)',
     'guias_blindadas': '🛡️ Guia(s) Blindada(s)',
-    'erros': '⚠️ Avisos e Erros Durante o Processamento'
+    'erros': '⚠️ Avisos e Erros Durante o Processamento',
+    'motivo_encerramento': '🚪 Motivo de Encerramento (11 ➔ 12)'
 }
 
 def botao_copiar_codigo(xml_str, key_sufixo):
@@ -627,43 +649,92 @@ def botao_copiar_codigo(xml_str, key_sufixo):
     """
     components.html(html_copiar, height=50)
 
-col1, col2 = st.columns([1, 1.2], gap="large")
+import io
+import zipfile
+
+# --- ESTRUTURA DAS COLUNAS DA INTERFACE ---
+col1, col2 = st.columns([1, 1])
 
 with col1:
     with st.container(border=True):
-        st.markdown("### 📜 Processamento do XML")
-        st.markdown("Arraste o arquivo XML gerado pelo seu sistema aqui.")
-        xml_up = st.file_uploader(
-            "Arraste o arquivo XML", type=['xml'], label_visibility="collapsed",
-            accept_multiple_files=False
+        st.markdown("### 📜 Processamento de XMLs em Lote")
+        st.caption("Arraste um ou múltiplos arquivos XML gerados pelo seu sistema.")
+
+        # Habilita múltiplos arquivos com accept_multiple_files=True
+        arquivos_xml = st.file_uploader(
+            "Selecione os arquivos XML",
+            type=["xml"],
+            accept_multiple_files=True,
+            key="uploader_xml_lote"
         )
 
-        if xml_up:
-            st.caption(f"Arquivo selecionado: **{xml_up.name}**")
-            if st.button("🚀 Iniciar Correção Automática", type="primary", use_container_width=True):
-                dfs_atuais = {k: st.session_state[f'tab_{k}'] for k in tabelas_padrao.keys()}
-                resultados_lote = []
-                
-                # Encapsula em uma lista para manter compatibilidade com a exibição de auditoria
-                arquivo = xml_up
-                resultado = {'nome': arquivo.name, 'xml_bytes': None, 'auditoria': None, 'falha_total': None}
-                try:
-                    xml_resultado, auditoria = processar_xml_tiss(arquivo, dfs_atuais)
-                    resultado['xml_bytes'] = xml_resultado
-                    resultado['auditoria'] = auditoria
-                except Exception as e:
-                    resultado['falha_total'] = str(e)
-                
-                resultados_lote.append(resultado)
-                st.session_state['resultados_lote'] = resultados_lote
+        if arquivos_xml:
+            st.info(f"📁 **{len(arquivos_xml)}** arquivo(s) selecionado(s).")
+
+        if st.button("🚀 Iniciar Correção Automática", type="primary", use_container_width=True):
+            if arquivos_xml:
+                resultados = []
+                for arq in arquivos_xml:
+                    try:
+                        arq.seek(0)
+                        xml_bytes, aud = processar_xml_tiss(arq, dfs)
+                        resultados.append({
+                            'nome': arq.name,
+                            'xml_bytes': xml_bytes,
+                            'auditoria': aud,
+                            'falha_total': None
+                        })
+                    except Exception as e:
+                        resultados.append({
+                            'nome': arq.name,
+                            'xml_bytes': None,
+                            'auditoria': {},
+                            'falha_total': str(e)
+                        })
+                st.session_state['resultados_lote'] = resultados
+                st.rerun()
+            else:
+                st.warning("Por favor, selecione pelo menos um arquivo XML.")
 
 with col2:
     if 'resultados_lote' in st.session_state and st.session_state['resultados_lote']:
-        resultado = st.session_state['resultados_lote'][0]
-
+        resultados = st.session_state['resultados_lote']
+        
         with st.container(border=True):
             st.markdown("### 📊 Resultado da Auditoria")
 
+            # Se houver mais de 1 arquivo, permite escolher qual inspecionar e gera o ZIP
+            if len(resultados) > 1:
+                nomes_arquivos = [r['nome'] for r in resultados]
+                
+                # Botão para baixar TODOS em um arquivo ZIP
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                    for res in resultados:
+                        if res['xml_bytes']:
+                            zip_file.writestr(f"PRONTO_{res['nome']}", res['xml_bytes'])
+                zip_buffer.seek(0)
+
+                st.download_button(
+                    label="📦 Baixar Todos os XMLs Corrigidos (.ZIP)",
+                    data=zip_buffer,
+                    file_name="XMLS_CORRIGIDOS.zip",
+                    mime="application/zip",
+                    type="primary",
+                    use_container_width=True
+                )
+                
+                st.divider()
+
+                nome_selecionado = st.selectbox(
+                    "🔍 Selecione o arquivo para visualizar os detalhes:",
+                    options=nomes_arquivos
+                )
+                resultado = next(r for r in resultados if r['nome'] == nome_selecionado)
+            else:
+                resultado = resultados[0]
+
+            # Exibição do Resultado do Arquivo Selecionado
             if resultado.get('falha_total'):
                 st.error(f"❌ **{resultado['nome']}**: {resultado['falha_total']}")
             else:
@@ -677,23 +748,23 @@ with col2:
 
                 aud = resultado.get('auditoria', {})
 
-                # 1. Cartões de Métricas
+                # 1. Cartões de Métricas do Arquivo Selecionado
                 st.divider()
                 st.markdown("#### 📈 Resumo das Alterações")
                 
                 c1_m, c2_m, c3_m = st.columns(3)
                 c1_m.metric("🔀 Médicos Trocados", len(aud.get('medicos_trocados', [])))
                 c2_m.metric("👩‍⚕️ CBOs / Códs", len(aud.get('cbos', [])))
-                c3_m.metric("🤝 Conveniados Remov.", len(aud.get('conveniados_excluidos', [])))
+                c3_m.metric("➖ Valores Negativos", len(aud.get('valores_negativos', [])))
 
                 c4_m, c5_m, c6_m = st.columns(3)
-                c4_m.metric("🔄 Itens Traduzidos", len(aud.get('itens', [])))
-                c5_m.metric("📦 Unid. Medida", len(aud.get('unidades', [])))
-                c6_m.metric("⏱️ Tempos O²", len(aud.get('oxigenio', [])))
+                c4_m.metric("🚪 Motivo Enc. (11➔12)", len(aud.get('motivo_encerramento', [])))
+                c5_m.metric("🔄 Itens Traduzidos", len(aud.get('itens', [])))
+                c6_m.metric("📦 Unid. Medida", len(aud.get('unidades', [])))
 
                 c7_m, c8_m, c9_m = st.columns(3)
-                c7_m.metric("⚙️ Procs. Ajustados", len(aud.get('procedimentos_ajustados', [])))
-                c8_m.metric("🩺 Itens ANVISA", len(aud.get('anvisa', [])))
+                c7_m.metric("⏱️ Tempos O²", len(aud.get('oxigenio', [])))
+                c8_m.metric("⚙️ Procs. Ajustados", len(aud.get('procedimentos_ajustados', [])))
                 c9_m.metric("🛡️ Guia(s) Blindada(s)", len(aud.get('guias_blindadas', [])))
 
                 if aud.get('erros'):
@@ -701,10 +772,9 @@ with col2:
 
                 st.divider()
 
-                # 2. Botões de Ação com CSS de Alinhamento
-                st.markdown("#### 🚀 Ações")
+                # 2. Botões de Ação do Arquivo Selecionado
+                st.markdown("#### 🚀 Ações Individuais")
                 
-                # CSS para remover margens extras do iframe do botão de cópia
                 st.markdown("""
                     <style>
                     div[data-testid="stCustomComponentV1"] {
@@ -727,11 +797,12 @@ with col2:
                         file_name=f"PRONTO_{resultado['nome']}",
                         mime="application/xml",
                         type="primary",
-                        use_container_width=True
+                        use_container_width=True,
+                        key=f"dl_{resultado['nome']}"
                     )
                     
                 with c2:
-                    botao_copiar_codigo(xml_texto, key_sufixo="copia_xml_unico")
+                    botao_copiar_codigo(xml_texto, key_sufixo=f"copia_{resultado['nome']}")
 
                 st.divider()
 
@@ -755,7 +826,7 @@ with col2:
 
     else:
         with st.container(border=True):
-            st.info("Aguardando arquivo XML. Faça o upload na coluna ao lado.")
+            st.info("Aguardando arquivo(s) XML. Faça o upload na coluna ao lado.")
 
 st.markdown("<br>", unsafe_allow_html=True)
 

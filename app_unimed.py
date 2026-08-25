@@ -644,7 +644,7 @@ with col2:
 
                 aud = resultado.get('auditoria', {})
 
-                # 1. Cartões de Métricas com as quantidades alteradas
+                # 1. Cartões de Métricas
                 st.divider()
                 st.markdown("#### 📈 Resumo das Alterações")
                 
@@ -668,9 +668,24 @@ with col2:
 
                 st.divider()
 
-                # 2. Botões de Ação com alinhamento vertical corrigido
+                # 2. Botões de Ação com CSS de Alinhamento
                 st.markdown("#### 🚀 Ações")
-                c1, c2 = st.columns(2, vertical_alignment="center")
+                
+                # CSS para remover margens extras do iframe do botão de cópia
+                st.markdown("""
+                    <style>
+                    div[data-testid="stCustomComponentV1"] {
+                        margin-top: 0px !important;
+                        padding-top: 0px !important;
+                    }
+                    div[data-testid="stCustomComponentV1"] iframe {
+                        display: block;
+                        vertical-align: middle;
+                    }
+                    </style>
+                """, unsafe_allow_html=True)
+
+                c1, c2 = st.columns(2, vertical_alignment="bottom")
                 
                 with c1:
                     st.download_button(
@@ -687,7 +702,7 @@ with col2:
 
                 st.divider()
 
-                # 3. Detalhes escondidos em menus sanfona (expanders)
+                # 3. Detalhes em menus sanfona
                 with st.expander("📝 Ver Detalhes das Modificações"):
                     tem_alteracao = False
                     if isinstance(aud, dict):

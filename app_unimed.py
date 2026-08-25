@@ -213,7 +213,9 @@ def processar_xml_tiss(arquivo_xml, dfs):
     corrigir_valores_negativos(root, auditoria)
     corrigir_motivo_encerramento(root, auditoria)
     
-  dict_medicos = {str(r['Nome do Médico']).strip().upper(): r for _, r in dfs['medicos'].iterrows()}
+ dict_medicos = {}
+    if isinstance(dfs, dict) and 'medicos' in dfs and dfs['medicos'] is not None:
+        dict_medicos = {str(r['Nome do Médico']).strip().upper(): r for _, r in dfs['medicos'].iterrows()}
     
     # 🔄 MAPEAMENTO EXCLUSIVO PARA TROCA DE EQUIPE COMPLETA EM SADT
     dict_equipe_sadt = {}

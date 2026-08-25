@@ -636,18 +636,41 @@ with col2:
             else:
                 st.success(f"✅ Arquivo **{resultado['nome']}** processado com sucesso!")
 
-                # Converte bytes para texto tratando a codificação ISO-8859-1 comum em XMLs TISS
                 xml_bytes = resultado['xml_bytes']
                 try:
                     xml_texto = xml_bytes.decode('ISO-8859-1')
                 except (UnicodeDecodeError, AttributeError):
                     xml_texto = xml_bytes.decode('utf-8', errors='replace') if isinstance(xml_bytes, bytes) else xml_bytes
 
+                aud = resultado.get('auditoria', {})
+
+                # 1. Cartões de Métricas com as quantidades alteradas
+                st.divider()
+                st.markdown("#### 📈 Resumo das Alterações")
+                
+                c1_m, c2_m, c3_m = st.columns(3)
+                c1_m.metric("🔀 Médicos Trocados", len(aud.get('medicos_trocados', [])))
+                c2_m.metric("👩‍⚕️ CBOs / Códs", len(aud.get('cbos', [])))
+                c3_m.metric("🤝 Conveniados Remov.", len(aud.get('conveniados_excluidos', [])))
+
+                c4_m, c5_m, c6_m = st.columns(3)
+                c4_m.metric("🔄 Itens Traduzidos", len(aud.get('itens', [])))
+                c5_m.metric("📦 Unid. Medida", len(aud.get('unidades', [])))
+                c6_m.metric("⏱️ Tempos O²", len(aud.get('oxigenio', [])))
+
+                c7_m, c8_m, c9_m = st.columns(3)
+                c7_m.metric("⚙️ Procs. Ajustados", len(aud.get('procedimentos_ajustados', [])))
+                c8_m.metric("🩺 Itens ANVISA", len(aud.get('anvisa', [])))
+                c9_m.metric("🛡️ Guia(s) Blindada(s)", len(aud.get('guias_blindadas', [])))
+
+                if aud.get('erros'):
+                    st.warning(f"⚠️ {len(aud['erros'])} aviso(s)/erro(s) pontual(is) durante o processamento.")
+
                 st.divider()
 
-                # Botões de Ação Principais em destaque
+                # 2. Botões de Ação com alinhamento vertical corrigido
                 st.markdown("#### 🚀 Ações")
-                c1, c2 = st.columns(2)
+                c1, c2 = st.columns(2, vertical_alignment="center")
                 
                 with c1:
                     st.download_button(
@@ -660,16 +683,13 @@ with col2:
                     )
                     
                 with c2:
-                    # Usa a sua função original para o botão de cópia ficar grande e lado a lado
                     botao_copiar_codigo(xml_texto, key_sufixo="copia_xml_unico")
 
                 st.divider()
 
-                # Esconde o relatório até ser clicado
+                # 3. Detalhes escondidos em menus sanfona (expanders)
                 with st.expander("📝 Ver Detalhes das Modificações"):
-                    aud = resultado.get('auditoria', {})
                     tem_alteracao = False
-
                     if isinstance(aud, dict):
                         for chave, lista_logs in aud.items():
                             if lista_logs:
@@ -682,7 +702,6 @@ with col2:
                     if not tem_alteracao:
                         st.info("Nenhuma alteração foi necessária neste XML.")
 
-                # Esconde o código XML completo até ser clicado
                 with st.expander("🔍 Inspecionar Código Visualmente"):
                     st.code(xml_texto, language='xml')
 

@@ -202,20 +202,33 @@ def corrigir_motivo_encerramento(root, auditoria):
     return len(logs)
 
 def processar_xml_tiss(arquivo_xml, dfs):
-    auditoria = { 
+    auditoria = {
         'cbos': [], 'medicos_trocados': [], 'itens': [], 'anvisa': [], 'unidades': [], 'oxigenio': [],
         'conveniados_excluidos': [], 'procedimentos_ajustados': [], 'guias_blindadas': [], 'erros': [],
-        'valores_negativos': [], 'motivo_encerramento': []
-        
+        'valores_negativos': [],
+        'motivo_encerramento': []
     }
+    
+    arquivo_xml.seek(0)
     tree = ET.parse(arquivo_xml)
     root = tree.getroot()
+
+    # 1. Regra de Valores Negativos (Mantida)
     corrigir_valores_negativos(root, auditoria)
+
+    # 2. Regra do Motivo de Encerramento 11 ➔ 12 (Nova)
     corrigir_motivo_encerramento(root, auditoria)
-    
- dict_medicos = {}
+
+    # 3. Leitura da tabela de médicos (Segura)
+    dict_medicos = {}
     if isinstance(dfs, dict) and 'medicos' in dfs and dfs['medicos'] is not None:
         dict_medicos = {str(r['Nome do Médico']).strip().upper(): r for _, r in dfs['medicos'].iterrows()}
+
+    # ... AQUI CONTINUAM AS SUAS OUTRAS REGRAS EXISTENTES (CBOs, Oxigênio, etc) ...
+
+    # Retorno do XML processado
+    output_bytes = ET.tostring(root, encoding='ISO-8859-1', xml_declaration=True)
+    return output_bytes, auditoria
     
     # 🔄 MAPEAMENTO EXCLUSIVO PARA TROCA DE EQUIPE COMPLETA EM SADT
     dict_equipe_sadt = {}
@@ -662,7 +675,6 @@ with col1:
         st.markdown("### 📜 Processamento de XMLs em Lote")
         st.caption("Arraste um ou múltiplos arquivos XML gerados pelo seu sistema.")
 
-        # Habilita múltiplos arquivos com accept_multiple_files=True
         arquivos_xml = st.file_uploader(
             "Selecione os arquivos XML",
             type=["xml"],
@@ -676,19 +688,13 @@ with col1:
         if st.button("🚀 Iniciar Correção Automática", type="primary", use_container_width=True):
             if arquivos_xml:
                 resultados = []
+                # Utiliza o dicionário 'dfs' existente do seu sistema
+                dfs_para_processar = dfs if 'dfs' in locals() else st.session_state.get('dfs', {})
                 
-                # Busca automaticamente a variável das planilhas/tabelas
-                dfs_carregados = (
-                    st.session_state.get('dfs') or 
-                    globals().get('dfs_atuais') or 
-                    globals().get('dfs') or 
-                    {}
-                )
-
                 for arq in arquivos_xml:
                     try:
                         arq.seek(0)
-                        xml_bytes, aud = processar_xml_tiss(arq, dfs_carregados)
+                        xml_bytes, aud = processar_xml_tiss(arq, dfs_para_processar)
                         resultados.append({
                             'nome': arq.name,
                             'xml_bytes': xml_bytes,

@@ -643,40 +643,49 @@ with col2:
                 except (UnicodeDecodeError, AttributeError):
                     xml_texto = xml_bytes.decode('utf-8', errors='replace') if isinstance(xml_bytes, bytes) else xml_bytes
 
-                # 1. Download Direto
-                st.download_button(
-                    label="📥 Baixar XML Validado",
-                    data=xml_bytes,
-                    file_name=f"PRONTO_{resultado['nome']}",
-                    mime="application/xml",
-                    type="primary",
-                    use_container_width=True
-                )
-
                 st.divider()
 
-                # 2. Exibição do XML com botão de cópia nativo
-                st.markdown("#### 📋 Conteúdo do XML Corrigido")
-                st.caption("Passe o mouse no bloco abaixo e clique no ícone de cópia no canto superior direito:")
-                st.code(xml_texto, language='xml', line_numbers=True)
-
-                st.divider()
-
-                # 3. Relatório de Modificações sem st.expander
-                st.markdown("#### 📝 Relatório de Modificações")
-                aud = resultado.get('auditoria', {})
-                tem_alteracao = False
-
-                if isinstance(aud, dict):
-                    for chave, lista_logs in aud.items():
-                        if lista_logs:
-                            tem_alteracao = True
-                            st.markdown(f"**{TITULOS_AMIGAVEIS_AUDITORIA.get(chave, chave)}**")
-                            for item in lista_logs:
-                                st.caption(f"• {item}")
+                # Botões de Ação Principais em destaque
+                st.markdown("#### 🚀 Ações")
+                c1, c2 = st.columns(2)
                 
-                if not tem_alteracao:
-                    st.info("Nenhuma alteração foi necessária neste XML.")
+                with c1:
+                    st.download_button(
+                        label="📥 Baixar XML Validado",
+                        data=xml_bytes,
+                        file_name=f"PRONTO_{resultado['nome']}",
+                        mime="application/xml",
+                        type="primary",
+                        use_container_width=True
+                    )
+                    
+                with c2:
+                    # Usa a sua função original para o botão de cópia ficar grande e lado a lado
+                    botao_copiar_codigo(xml_texto, key_sufixo="copia_xml_unico")
+
+                st.divider()
+
+                # Esconde o relatório até ser clicado
+                with st.expander("📝 Ver Detalhes das Modificações"):
+                    aud = resultado.get('auditoria', {})
+                    tem_alteracao = False
+
+                    if isinstance(aud, dict):
+                        for chave, lista_logs in aud.items():
+                            if lista_logs:
+                                tem_alteracao = True
+                                st.markdown(f"**{TITULOS_AMIGAVEIS_AUDITORIA.get(chave, chave)}**")
+                                for item in lista_logs:
+                                    st.caption(f"• {item}")
+                                st.markdown("---")
+                    
+                    if not tem_alteracao:
+                        st.info("Nenhuma alteração foi necessária neste XML.")
+
+                # Esconde o código XML completo até ser clicado
+                with st.expander("🔍 Inspecionar Código Visualmente"):
+                    st.code(xml_texto, language='xml')
+
     else:
         with st.container(border=True):
             st.info("Aguardando arquivo XML. Faça o upload na coluna ao lado.")

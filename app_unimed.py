@@ -339,6 +339,15 @@ def processar_xml_tiss(arquivo_xml, dfs):
                     # de procedimentoExecutado (depois de identEquipe) — era isso que
                     # gerava o erro "elemento viaAcesso não é esperado".
                     quantidade_elem = proc_exec.find('ans:quantidadeExecutada', NS)
+                    # 🛠️ Captura o padrão de indentação/quebra de linha usado pelos irmãos
+                    # deste nível, para que tags recém-criadas herdem a mesma formatação
+                    # em vez de ficarem "grudadas" na mesma linha da tag anterior.
+                    indent_tail = quantidade_elem.tail if quantidade_elem is not None else None
+
+                    def _normaliza_via_tecnica(valor):
+                        # 🛠️ CORREÇÃO: o schema TISS não aceita zero à esquerda em
+                        # viaAcesso/tecnicaUtilizada — "01"/"02" precisam virar "1"/"2".
+                        return str(int(valor)) if valor.isdigit() else valor
 
                     via_val = str(regra_p.get('Via de Acesso (1, 2 ou EXCLUIR)', '')).strip().upper()
                     via_elem = proc_exec.find('ans:viaAcesso', NS)
@@ -347,10 +356,12 @@ def processar_xml_tiss(arquivo_xml, dfs):
                         via_elem = None
                         detalhes_proc.append("Via de Acesso excluída")
                     elif via_val in ['1', '2', '01', '02']:
+                        via_val = _normaliza_via_tecnica(via_val)
                         if via_elem is not None: via_elem.text = via_val
                         else:
                             via_elem = ET.Element(ans_tag('viaAcesso'))
                             via_elem.text = via_val
+                            via_elem.tail = indent_tail
                             proc_exec.insert(indice_apos(proc_exec, quantidade_elem), via_elem)
                         detalhes_proc.append(f"Via de Acesso ajustada: {via_val}")
                         
@@ -363,10 +374,12 @@ def processar_xml_tiss(arquivo_xml, dfs):
                         proc_exec.remove(tec_elem)
                         detalhes_proc.append("Técnica excluída")
                     elif tec_val in ['1', '2', '01', '02']:
+                        tec_val = _normaliza_via_tecnica(tec_val)
                         if tec_elem is not None: tec_elem.text = tec_val
                         else:
                             tec_elem = ET.Element(ans_tag('tecnicaUtilizada'))
                             tec_elem.text = tec_val
+                            tec_elem.tail = indent_tail
                             # Insere logo após viaAcesso (se existir) ou após quantidadeExecutada
                             ref_apos = via_elem if via_elem is not None else quantidade_elem
                             proc_exec.insert(indice_apos(proc_exec, ref_apos), tec_elem)

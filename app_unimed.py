@@ -273,8 +273,12 @@ def processar_xml_tiss(arquivo_xml, dfs):
                                     eq_sadt.append(crm_el)
                                     
                             if regra['cbo_novo']:
-                                cbo_el = eq_sadt.find('ans:CBOS', NS) or eq_sadt.find('ans:codigoCBOS', NS)
-                                if cbo_el is not None: cbo_el.text = regra['cbo_novo']
+                                cbos_existentes = [c for c in eq_sadt.iter() if tag_limpa(c) in ['CBOS', 'codigoCBOS', 'codigoCBO']]
+                                if cbos_existentes:
+                                    cbos_existentes[0].text = regra['cbo_novo']
+                                    for c_extra in cbos_existentes[1:]:
+                                        for parent in eq_sadt.iter():
+                                            if c_extra in list(parent): parent.remove(c_extra)
                                 else:
                                     cbo_el = ET.Element(ans_tag('CBOS'))
                                     cbo_el.text = regra['cbo_novo']
@@ -420,16 +424,28 @@ def processar_xml_tiss(arquivo_xml, dfs):
                             regra_m = dict_medicos[nome_prof]
                             cbo_novo = limpar_numero(regra_m.get('CBO Correto', ''))
                             
-                            cbo_elem = eq.find('.//ans:CBOS', NS) or eq.find('.//ans:codigoCBOS', NS) or eq.find('.//ans:codigoCBO', NS)
+                            target_node = eq if tag_limpa(eq) == 'equipeSadt' else (eq.find('ans:identificacaoEquipe', NS) or eq)
+
+                            # Busca qualquer tag de CBO existente na estrutura
+                            cbos_existentes = [elem for elem in eq.iter() if tag_limpa(elem) in ['CBOS', 'codigoCBOS', 'codigoCBO']]
+
                             if cbo_novo != '':
-                                if cbo_elem is not None:
-                                    if cbo_elem.text != cbo_novo:
-                                        cbo_elem.text = cbo_novo
+                                if cbos_existentes:
+                                    # Atualiza o CBO original diretamente
+                                    primeiro_cbo = cbos_existentes[0]
+                                    if primeiro_cbo.text != cbo_novo:
+                                        primeiro_cbo.text = cbo_novo
                                         auditoria['cbos'].append(f"Médico(a) '{nome_prof}': CBO alterado para {cbo_novo}")
+                                    
+                                    # Se houver duplicatas por erro antigo, remove as extras
+                                    for c_extra in cbos_existentes[1:]:
+                                        for parent in eq.iter():
+                                            if c_extra in list(parent): parent.remove(c_extra)
                                 else:
+                                    # Insere o novo CBO dentro do nó correto (identificacaoEquipe / equipeSadt)
                                     novo_cbo = ET.Element(ans_tag('CBOS'))
                                     novo_cbo.text = cbo_novo
-                                    eq.append(novo_cbo)
+                                    target_node.append(novo_cbo)
                                     auditoria['cbos'].append(f"Médico(a) '{nome_prof}': CBO inserido ({cbo_novo})")
                             
                             substituir = str(regra_m.get('Substituir por Cód. Operadora', '')).strip().upper() == 'SIM'
@@ -640,7 +656,6 @@ with col1:
         if st.button("🚀 Iniciar Correção Automática", type="primary", use_container_width=True):
             if arquivos_xml:
                 resultados = []
-                # Monta o dicionário 'dfs' a partir das tabelas no st.session_state
                 dfs_para_processar = {
                     aba: st.session_state.get(f'tab_{aba}', tabelas_padrao[aba])
                     for aba in tabelas_padrao.keys()

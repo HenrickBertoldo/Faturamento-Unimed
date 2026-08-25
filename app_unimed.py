@@ -205,7 +205,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
     auditoria = { 
         'cbos': [], 'medicos_trocados': [], 'itens': [], 'anvisa': [], 'unidades': [], 'oxigenio': [],
         'conveniados_excluidos': [], 'procedimentos_ajustados': [], 'guias_blindadas': [], 'erros': [],
-        'valores_negativos': []. 'motivo_encerramento': []
+        'valores_negativos': [], 'motivo_encerramento': []
         
     }
     tree = ET.parse(arquivo_xml)

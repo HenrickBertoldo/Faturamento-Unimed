@@ -572,7 +572,7 @@ def botao_copiar_codigo(xml_str, key_sufixo):
         cursor: pointer; font-size: 14px; font-weight: 600;
         transition: 0.2s; box-shadow: 0px 2px 4px rgba(0,0,0,0.1);
     " onmouseover="this.style.backgroundColor='#F5F5F5'" onmouseout="this.style.backgroundColor='#FFFFFF'">
-    📋 Copiar Código-Fonte para a Área de Transferência
+    📋 Copiar XML para a Área de Transferência
     </button>
     <script>
     document.getElementById("cpBtn_{key_sufixo}").addEventListener("click", () => {{

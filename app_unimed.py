@@ -151,43 +151,44 @@ def padronizar_codigo_8_digitos(cod):
     c = limpar_numero(cod)
     return "0" + c if len(c) == 7 and c.isdigit() else c
 
-def corrigir_valores_negativos(root, auditoria):
+def corrigir_valores_negativos_texto(xml_texto, auditoria):
     """
-    Localiza tags <ans:quantidadeExecutada> e <ans:valorTotal> com valores negativos
-    e remove apenas o sinal de menos (-).
+    Localiza no texto do XML as tags <ans:quantidadeExecutada> e <ans:valorTotal> 
+    que possuem valores negativos e remove apenas o sinal de menos (-).
     """
     logs = []
     
-    # Percorre todos os elementos da árvore XML
-    for elem in root.iter():
-        # Extrai apenas o nome da tag, ignorando o namespace
-        tag_nome = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
-        
-        if tag_nome in ['quantidadeExecutada', 'valorTotal'] and elem.text:
-            texto_original = elem.text.strip()
-            
-            # Verifica se o valor começa com sinal de negativo
-            if texto_original.startswith('-'):
-                # Remove o sinal de negativo preservando a formatação das casas decimais
-                texto_corrigido = texto_original.lstrip('-')
-                elem.text = texto_corrigido
-                
-                logs.append(f"Tag <{tag_nome}>: {texto_original} ➔ {texto_corrigido}")
+    # Regex para identificar as tags com sinal negativo
+    padrao = r'(<(?:[a-zA-Z0-9_-]+:)?(?:quantidadeExecutada|valorTotal)>)\s*-\s*([0-9]+(?:\.[0-9]+)?)\s*(</(?:[a-zA-Z0-9_-]+:)?(?:quantidadeExecutada|valorTotal)>)'
     
-    # Salva os registros na auditoria
+    def substituir(match):
+        tag_inicio = match.group(1)
+        valor_num = match.group(2)
+        tag_fim = match.group(3)
+        
+        nome_tag = tag_inicio.replace('<', '').replace('>', '').split(':')[-1]
+        logs.append(f"Tag <{nome_tag}>: -{valor_num} ➔ {valor_num}")
+        
+        return f"{tag_inicio}{valor_num}{tag_fim}"
+    
+    xml_corrigido = re.sub(padrao, substituir, xml_texto)
+    
     if 'valores_negativos' not in auditoria:
         auditoria['valores_negativos'] = []
     auditoria['valores_negativos'].extend(logs)
     
-    return len(logs)
+    return xml_corrigido
 
 def processar_xml_tiss(arquivo_xml, dfs):
     auditoria = { 
         'cbos': [], 'medicos_trocados': [], 'itens': [], 'anvisa': [], 'unidades': [], 'oxigenio': [],
-        'conveniados_excluidos': [], 'procedimentos_ajustados': [], 'guias_blindadas': [], 'erros': []
+        'conveniados_excluidos': [], 'procedimentos_ajustados': [], 'guias_blindadas': [], 'erros': [],
+        'valores_negativos': []
+        
     }
     tree = ET.parse(arquivo_xml)
     root = tree.getroot()
+    corrigir_valores_negativos(root, auditoria)
     
     dict_medicos = {str(r['Nome do Médico']).strip().upper(): r for _, r in dfs['medicos'].iterrows()}
     

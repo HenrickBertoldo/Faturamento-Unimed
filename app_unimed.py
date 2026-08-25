@@ -34,6 +34,13 @@ ET.register_namespace('xsi', 'http://www.w3.org/2001/XMLSchema-instance')
 def ans_tag(tag_name): return f"{{{NS['ans']}}}{tag_name}"
 def tag_limpa(element): return element.tag.split('}')[-1] if '}' in element.tag else element.tag
 
+def indice_apos(parent, elem_ref):
+    """Retorna o índice, dentro de 'parent', imediatamente após 'elem_ref'.
+    Se elem_ref for None, retorna o final da lista de filhos (append)."""
+    if elem_ref is None:
+        return len(list(parent))
+    return list(parent).index(elem_ref) + 1
+
 def limpar_numero(valor):
     v = str(valor).strip()
     if v.lower() in ['nan', 'none', '<na>', '']: return ''
@@ -327,30 +334,42 @@ def processar_xml_tiss(arquivo_xml, dfs):
                                     
                         detalhes_proc.append(f"Grau inserido: {grau_val}")
                         
+                    # 🛠️ CORREÇÃO: viaAcesso e tecnicaUtilizada precisam ficar logo após
+                    # quantidadeExecutada (ordem exigida pelo schema TISS), nunca no final
+                    # de procedimentoExecutado (depois de identEquipe) — era isso que
+                    # gerava o erro "elemento viaAcesso não é esperado".
+                    quantidade_elem = proc_exec.find('ans:quantidadeExecutada', NS)
+
                     via_val = str(regra_p.get('Via de Acesso (1, 2 ou EXCLUIR)', '')).strip().upper()
                     via_elem = proc_exec.find('ans:viaAcesso', NS)
                     if via_val == 'EXCLUIR' and via_elem is not None:
                         proc_exec.remove(via_elem)
+                        via_elem = None
                         detalhes_proc.append("Via de Acesso excluída")
                     elif via_val in ['1', '2', '01', '02']:
                         if via_elem is not None: via_elem.text = via_val
                         else:
                             via_elem = ET.Element(ans_tag('viaAcesso'))
                             via_elem.text = via_val
-                            proc_exec.append(via_elem)
+                            proc_exec.insert(indice_apos(proc_exec, quantidade_elem), via_elem)
                         detalhes_proc.append(f"Via de Acesso ajustada: {via_val}")
                         
+                    # 🛠️ CORREÇÃO: a tag correta é 'tecnicaUtilizada' — 'tecnica' não existe
+                    # no schema TISS, por isso o valor nunca era encontrado/atualizado e uma
+                    # tag inválida extra era criada.
                     tec_val = str(regra_p.get('Técnica (1, 2 ou EXCLUIR)', '')).strip().upper()
-                    tec_elem = proc_exec.find('ans:tecnica', NS)
+                    tec_elem = proc_exec.find('ans:tecnicaUtilizada', NS)
                     if tec_val == 'EXCLUIR' and tec_elem is not None:
                         proc_exec.remove(tec_elem)
                         detalhes_proc.append("Técnica excluída")
                     elif tec_val in ['1', '2', '01', '02']:
                         if tec_elem is not None: tec_elem.text = tec_val
                         else:
-                            tec_elem = ET.Element(ans_tag('tecnica'))
+                            tec_elem = ET.Element(ans_tag('tecnicaUtilizada'))
                             tec_elem.text = tec_val
-                            proc_exec.append(tec_elem)
+                            # Insere logo após viaAcesso (se existir) ou após quantidadeExecutada
+                            ref_apos = via_elem if via_elem is not None else quantidade_elem
+                            proc_exec.insert(indice_apos(proc_exec, ref_apos), tec_elem)
                         detalhes_proc.append(f"Técnica ajustada: {tec_val}")
                         
                     if detalhes_proc: auditoria['procedimentos_ajustados'].append(f"Proc {cod_p}: " + " | ".join(detalhes_proc))

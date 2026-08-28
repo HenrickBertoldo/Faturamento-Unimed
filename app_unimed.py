@@ -111,13 +111,16 @@ if "app_inicializado" not in st.session_state:
 # ==========================================
 def calcular_tempo_oxigenio(hora_ini_str, qtd_executada, tipo_unidade):
     try:
-        t_ini = datetime.strptime(hora_ini_str.strip(), "%H:%M:%S")
         qtd = float(qtd_executada.strip())
-        if tipo_unidade == '60034335': return (t_ini + timedelta(hours=qtd)).strftime("%H:%M:%S"), True
-        elif tipo_unidade == '60034343': return (t_ini + timedelta(minutes=qtd)).strftime("%H:%M:%S"), True
-        return hora_ini_str, True
+        # Regra especial: quantidade executada = 24 (horas) -> dia inteiro (00:00:00 às 23:59:59)
+        if tipo_unidade == '60034335' and qtd == 24:
+            return "00:00:00", "23:59:59", True
+        t_ini = datetime.strptime(hora_ini_str.strip(), "%H:%M:%S")
+        if tipo_unidade == '60034335': return hora_ini_str, (t_ini + timedelta(hours=qtd)).strftime("%H:%M:%S"), True
+        elif tipo_unidade == '60034343': return hora_ini_str, (t_ini + timedelta(minutes=qtd)).strftime("%H:%M:%S"), True
+        return hora_ini_str, hora_ini_str, True
     except (ValueError, AttributeError, TypeError):
-        return hora_ini_str, False
+        return hora_ini_str, hora_ini_str, False
 
 def reordenar_servico_executado(servicos_node, nova_anvisa=None, nova_ref=None):
     valores = {tag_limpa(c): c for c in list(servicos_node)}
@@ -485,10 +488,12 @@ def processar_xml_tiss(arquivo_xml, dfs):
                         if cod_item in ['60034335', '60034343']:
                             h_ini, h_fim, qtd_ex = servicos.find('ans:horaInicial', NS), servicos.find('ans:horaFinal', NS), servicos.find('ans:quantidadeExecutada', NS)
                             if h_ini is not None and h_fim is not None and qtd_ex is not None:
-                                h_novo, ok = calcular_tempo_oxigenio(h_ini.text, qtd_ex.text, cod_item)
+                                h_ini_novo, h_fim_novo, ok = calcular_tempo_oxigenio(h_ini.text, qtd_ex.text, cod_item)
                                 if ok:
-                                    auditoria['oxigenio'].append(f"Oxigênio {cod_item}: Hora Final recalculada para {h_novo}")
-                                    h_fim.text = h_novo
+                                    if h_ini.text != h_ini_novo or h_fim.text != h_fim_novo:
+                                        auditoria['oxigenio'].append(f"Oxigênio {cod_item}: Hora Inicial/Final ajustadas para {h_ini_novo} / {h_fim_novo}")
+                                    h_ini.text = h_ini_novo
+                                    h_fim.text = h_fim_novo
                                 else:
                                     auditoria['erros'].append(f"Item {cod_item}: não foi possível recalcular hora de O² (horaInicial='{h_ini.text}', qtd='{qtd_ex.text}') — mantido valor original")
 

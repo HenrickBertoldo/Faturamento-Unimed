@@ -35,6 +35,8 @@ def ans_tag(tag_name): return f"{{{NS['ans']}}}{tag_name}"
 def tag_limpa(element): return element.tag.split('}')[-1] if '}' in element.tag else element.tag
 
 def indice_apos(parent, elem_ref):
+    """Retorna o índice, dentro de 'parent', imediatamente após 'elem_ref'.
+    Se elem_ref for None, retorna o final da lista de filhos (append)."""
     if elem_ref is None:
         return len(list(parent))
     return list(parent).index(elem_ref) + 1
@@ -64,9 +66,12 @@ def formatar_tabela_padrao(df):
     for col in df.columns:
         df[col] = df[col].astype(str).str.strip().str.upper()
         df[col] = df[col].replace(['NAN', 'NONE', '<NA>'], '')
+        
+        # 🌟 CORREÇÃO: Força 2 dígitos com zero à esquerda para colunas específicas
         col_upper = col.upper()
         if any(k in col_upper for k in ['CONSELHO', 'UF', 'GRAU PART', 'VIA DE ACESSO', 'TÉCNICA']):
             df[col] = df[col].apply(lambda x: x.zfill(2) if (x.isdigit() and len(x) == 1) else x)
+            
     return df
 
 def carregar_do_sheets(silencioso=False):
@@ -110,17 +115,17 @@ if "app_inicializado" not in st.session_state:
 # MOTOR DE CORREÇÃO DO XML REVISADO 
 # ==========================================
 def calcular_tempo_oxigenio(hora_ini_str, qtd_executada, tipo_unidade):
+    """Retorna (hora_calculada, sucesso). Em caso de erro de formato, devolve
+    a hora original e sucesso=False para que o chamador registre a falha na
+    auditoria em vez de mascará-la silenciosamente."""
     try:
-        qtd = float(qtd_executada.strip())
-        # Regra especial: quantidade executada = 24 (horas) -> dia inteiro (00:00:00 às 23:59:59)
-        if tipo_unidade == '60034335' and qtd == 24:
-            return "00:00:00", "23:59:59", True
         t_ini = datetime.strptime(hora_ini_str.strip(), "%H:%M:%S")
-        if tipo_unidade == '60034335': return hora_ini_str, (t_ini + timedelta(hours=qtd)).strftime("%H:%M:%S"), True
-        elif tipo_unidade == '60034343': return hora_ini_str, (t_ini + timedelta(minutes=qtd)).strftime("%H:%M:%S"), True
-        return hora_ini_str, hora_ini_str, True
+        qtd = float(qtd_executada.strip())
+        if tipo_unidade == '60034335': return (t_ini + timedelta(hours=qtd)).strftime("%H:%M:%S"), True
+        elif tipo_unidade == '60034343': return (t_ini + timedelta(minutes=qtd)).strftime("%H:%M:%S"), True
+        return hora_ini_str, True
     except (ValueError, AttributeError, TypeError):
-        return hora_ini_str, hora_ini_str, False
+        return hora_ini_str, False
 
 def reordenar_servico_executado(servicos_node, nova_anvisa=None, nova_ref=None):
     valores = {tag_limpa(c): c for c in list(servicos_node)}
@@ -146,68 +151,22 @@ def padronizar_codigo_8_digitos(cod):
     c = limpar_numero(cod)
     return "0" + c if len(c) == 7 and c.isdigit() else c
 
-def corrigir_valores_negativos(root, auditoria):
-    logs = []
-    for elem in root.iter():
-        tag_nome = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
-        if tag_nome in ['quantidadeExecutada', 'valorTotal'] and elem.text:
-            texto_original = elem.text.strip()
-            if texto_original.startswith('-'):
-                texto_corrigido = texto_original.lstrip('-')
-                elem.text = texto_corrigido
-                logs.append(f"Tag <{tag_nome}>: {texto_original} ➔ {texto_corrigido}")
-    
-    if 'valores_negativos' not in auditoria:
-        auditoria['valores_negativos'] = []
-    auditoria['valores_negativos'].extend(logs)
-    return len(logs)
-
-def corrigir_motivo_encerramento(root, auditoria):
-    logs = []
-    for elem in root.iter():
-        tag_nome = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
-        if tag_nome == 'motivoEncerramento' and elem.text:
-            if elem.text.strip() == '11':
-                elem.text = '12'
-                logs.append("Tag <motivoEncerramento>: 11 ➔ 12")
-    
-    if 'motivo_encerramento' not in auditoria:
-        auditoria['motivo_encerramento'] = []
-    auditoria['motivo_encerramento'].extend(logs)
-    return len(logs)
-
 def processar_xml_tiss(arquivo_xml, dfs):
-    auditoria = {
+    auditoria = { 
         'cbos': [], 'medicos_trocados': [], 'itens': [], 'anvisa': [], 'unidades': [], 'oxigenio': [],
-        'conveniados_excluidos': [], 'procedimentos_ajustados': [], 'guias_blindadas': [], 'erros': [],
-        'valores_negativos': [], 'motivo_encerramento': []
+        'conveniados_excluidos': [], 'procedimentos_ajustados': [], 'guias_blindadas': [], 'erros': []
     }
-    
-    arquivo_xml.seek(0)
     tree = ET.parse(arquivo_xml)
     root = tree.getroot()
-
-    # 1. Regra de Valores Negativos
-    corrigir_valores_negativos(root, auditoria)
-
-    # 2. Regra do Motivo de Encerramento 11 ➔ 12
-    corrigir_motivo_encerramento(root, auditoria)
-
-    # 3. Carregamento das Tabelas e Dicionários
-    df_medicos = dfs.get('medicos', pd.DataFrame()) if isinstance(dfs, dict) else pd.DataFrame()
-    dict_medicos = {}
-    if df_medicos is not None and not df_medicos.empty:
-        for _, r in df_medicos.iterrows():
-            nome = str(r.get('Nome do Médico', '')).strip().upper()
-            if nome and nome not in ['NAN', 'NONE', '<NA>', '']:
-                dict_medicos[nome] = r
-
-    df_equipe_sadt = dfs.get('troca_equipe_sadt', pd.DataFrame()) if isinstance(dfs, dict) else pd.DataFrame()
+    
+    dict_medicos = {str(r['Nome do Médico']).strip().upper(): r for _, r in dfs['medicos'].iterrows()}
+    
+    # 🔄 MAPEAMENTO EXCLUSIVO PARA TROCA DE EQUIPE COMPLETA EM SADT
     dict_equipe_sadt = {}
-    if df_equipe_sadt is not None and not df_equipe_sadt.empty:
-        for _, r in df_equipe_sadt.iterrows():
-            orig = str(r.get('Nome Original (Erro)', '')).strip().upper()
-            if orig and orig not in ['NAN', 'NONE', '<NA>', '']:
+    if 'troca_equipe_sadt' in dfs:
+        for _, r in dfs['troca_equipe_sadt'].iterrows():
+            orig = str(r['Nome Original (Erro)']).strip().upper()
+            if orig and orig != 'NAN' and orig != '':
                 dict_equipe_sadt[orig] = {
                     'nome_novo': str(r.get('Nome Novo', '')).strip(),
                     'crm_novo': limpar_numero(r.get('CRM Novo', '')),
@@ -218,310 +177,303 @@ def processar_xml_tiss(arquivo_xml, dfs):
                     'uf_nova': limpar_numero(r.get('UF Nova', ''))
                 }
 
-    df_conveniados = dfs.get('conveniados', pd.DataFrame()) if isinstance(dfs, dict) else pd.DataFrame()
-    set_conveniados = set(df_conveniados['Nome do Médico Conveniado'].dropna().astype(str).str.strip().str.upper()) if not df_conveniados.empty and 'Nome do Médico Conveniado' in df_conveniados.columns else set()
-
-    df_blindagem = dfs.get('blindagem', pd.DataFrame()) if isinstance(dfs, dict) else pd.DataFrame()
-    set_blindagem = set(df_blindagem['Código Prestador Protegido'].apply(limpar_numero).dropna()) if not df_blindagem.empty and 'Código Prestador Protegido' in df_blindagem.columns else set()
-
-    df_itens = dfs.get('itens', pd.DataFrame()) if isinstance(dfs, dict) else pd.DataFrame()
-    dict_itens = {padronizar_codigo_8_digitos(k): padronizar_codigo_8_digitos(v) for k, v in zip(df_itens['Código Incorreto'], df_itens['Código Correto']) if pd.notna(k)} if not df_itens.empty and 'Código Incorreto' in df_itens.columns else {}
-
-    df_unidades = dfs.get('unidades', pd.DataFrame()) if isinstance(dfs, dict) else pd.DataFrame()
-    dict_unidades = {padronizar_codigo_8_digitos(r['Código do Item']): limpar_numero(r['Unidade de Medida Correta']) for _, r in df_unidades.iterrows() if pd.notna(r.get('Código do Item'))} if not df_unidades.empty and 'Código do Item' in df_unidades.columns else {}
-
-    df_anvisa = dfs.get('anvisa', pd.DataFrame()) if isinstance(dfs, dict) else pd.DataFrame()
-    dict_anvisa = {padronizar_codigo_8_digitos(r['Código do Item']): r for _, r in df_anvisa.iterrows() if pd.notna(r.get('Código do Item'))} if not df_anvisa.empty and 'Código do Item' in df_anvisa.columns else {}
-
-    df_procedimentos = dfs.get('procedimentos', pd.DataFrame()) if isinstance(dfs, dict) else pd.DataFrame()
-    dict_procedimentos = {padronizar_codigo_8_digitos(r['Código do Procedimento']): r for _, r in df_procedimentos.iterrows() if pd.notna(r.get('Código do Procedimento'))} if not df_procedimentos.empty and 'Código do Procedimento' in df_procedimentos.columns else {}
+    set_conveniados = set(dfs['conveniados']['Nome do Médico Conveniado'].str.strip().str.upper().dropna())
+    set_blindagem = set(dfs['blindagem']['Código Prestador Protegido'].apply(limpar_numero).dropna())
+    dict_itens = {padronizar_codigo_8_digitos(k): padronizar_codigo_8_digitos(v) for k, v in zip(dfs['itens']['Código Incorreto'], dfs['itens']['Código Correto']) if pd.notna(k)}
+    dict_unidades = {padronizar_codigo_8_digitos(r['Código do Item']): limpar_numero(r['Unidade de Medida Correta']) for _, r in dfs['unidades'].iterrows() if pd.notna(r['Código do Item'])}
+    dict_anvisa = {padronizar_codigo_8_digitos(r['Código do Item']): r for _, r in dfs['anvisa'].iterrows() if pd.notna(r['Código do Item'])}
+    dict_procedimentos = {padronizar_codigo_8_digitos(r['Código do Procedimento']): r for _, r in dfs['procedimentos'].iterrows() if pd.notna(r['Código do Procedimento'])}
 
     guias_int = [(g, 'internacao') for g in root.findall('.//ans:guiaResumoInternacao', NS)]
     guias_sadt = [(g, 'sadt') for g in root.findall('.//ans:guiaSP-SADT', NS)]
     todas_guias = guias_int + guias_sadt
 
     for indice_guia, (guia, tipo_guia) in enumerate(todas_guias, start=1):
-        try:
-            prestador_elem = guia.find('.//ans:dadosPrestador/ans:codigoPrestadorNaOperadora', NS)
-            if prestador_elem is None:
-                prestador_elem = guia.find('.//ans:dadosContratado/ans:codigoPrestadorNaOperadora', NS)
-            if prestador_elem is not None and limpar_numero(prestador_elem.text) in set_blindagem:
-                auditoria['guias_blindadas'].append(f"Guia ignorada (Prestador {limpar_numero(prestador_elem.text)} protegido)")
-                continue
+      try:
+        # 🛠️ CORREÇÃO: 'or' entre Elements do ElementTree é perigoso — um elemento
+        # sem filhos (como esse, que só tem texto) avalia como False em booleano,
+        # então o 'or' sempre pulava para o segundo find(), mesmo quando o
+        # primeiro existia e estava correto. Trocado por checagem explícita.
+        prestador_elem = guia.find('.//ans:dadosPrestador/ans:codigoPrestadorNaOperadora', NS)
+        if prestador_elem is None:
+            prestador_elem = guia.find('.//ans:dadosContratado/ans:codigoPrestadorNaOperadora', NS)
+        if prestador_elem is not None and limpar_numero(prestador_elem.text) in set_blindagem:
+            auditoria['guias_blindadas'].append(f"Guia ignorada (Prestador {limpar_numero(prestador_elem.text)} protegido)")
+            continue
 
-            eh_unimed_0014 = False
-            if tipo_guia == 'internacao':
-                carteira_elem = guia.find('.//ans:dadosBeneficiario/ans:numeroCarteira', NS)
-                numero_carteira = limpar_numero(carteira_elem.text) if carteira_elem is not None and carteira_elem.text else ""
-                eh_unimed_0014 = numero_carteira.startswith('0014')
+        eh_unimed_0014 = False
+        if tipo_guia == 'internacao':
+            carteira_elem = guia.find('.//ans:dadosBeneficiario/ans:numeroCarteira', NS)
+            numero_carteira = limpar_numero(carteira_elem.text) if carteira_elem is not None and carteira_elem.text else ""
+            eh_unimed_0014 = numero_carteira.startswith('0014')
 
-            # --- SUBSTITUIÇÃO DE EQUIPE EM GUIAS SADT ---
-            if tipo_guia == 'sadt':
-                for eq_sadt in guia.findall('.//ans:equipeSadt', NS):
-                    nome_prof_elem = eq_sadt.find('ans:nomeProf', NS)
-                    if nome_prof_elem is not None and nome_prof_elem.text:
-                        nome_orig_xml = nome_prof_elem.text.strip().upper()
+        # =========================================================================
+        # ⚡ REGRA EXCLUSIVA: SUBSTITUIÇÃO DE EQUIPE EM GUIAS SADT
+        # =========================================================================
+        if tipo_guia == 'sadt':
+            for eq_sadt in guia.findall('.//ans:equipeSadt', NS):
+                nome_prof_elem = eq_sadt.find('ans:nomeProf', NS)
+                if nome_prof_elem is not None and nome_prof_elem.text:
+                    nome_orig_xml = nome_prof_elem.text.strip().upper()
+                    
+                    if nome_orig_xml in dict_equipe_sadt:
+                        regra = dict_equipe_sadt[nome_orig_xml]
                         
-                        if nome_orig_xml in dict_equipe_sadt:
-                            regra = dict_equipe_sadt[nome_orig_xml]
-                            
-                            if regra['nome_novo']: nome_prof_elem.text = regra['nome_novo']
-                            
-                            if regra['crm_novo']:
-                                crm_el = eq_sadt.find('ans:numeroConselhoProfissional', NS)
-                                if crm_el is not None: crm_el.text = regra['crm_novo']
-                                else:
-                                    crm_el = ET.Element(ans_tag('numeroConselhoProfissional'))
-                                    crm_el.text = regra['crm_novo']
-                                    eq_sadt.append(crm_el)
-                                    
-                            if regra['cbo_novo']:
-                                cbos_existentes = [c for c in eq_sadt.iter() if tag_limpa(c) in ['CBOS', 'codigoCBOS', 'codigoCBO']]
-                                if cbos_existentes:
-                                    cbos_existentes[0].text = regra['cbo_novo']
-                                    for c_extra in cbos_existentes[1:]:
-                                        for parent in eq_sadt.iter():
-                                            if c_extra in list(parent): parent.remove(c_extra)
-                                else:
-                                    cbo_el = ET.Element(ans_tag('CBOS'))
-                                    cbo_el.text = regra['cbo_novo']
-                                    eq_sadt.append(cbo_el)
-                                    
-                            if regra['grau_novo']:
-                                grau_el = eq_sadt.find('ans:grauPart', NS)
-                                if grau_el is not None: grau_el.text = regra['grau_novo']
-                                else:
-                                    grau_el = ET.Element(ans_tag('grauPart'))
-                                    grau_el.text = regra['grau_novo']
-                                    eq_sadt.insert(0, grau_el)
-                                    
-                            if regra['conselho_novo']:
-                                cons_el = eq_sadt.find('ans:conselho', NS)
-                                if cons_el is not None: cons_el.text = regra['conselho_novo']
-                                else:
-                                    cons_el = ET.Element(ans_tag('conselho'))
-                                    cons_el.text = regra['conselho_novo']
-                                    eq_sadt.append(cons_el)
-                                    
-                            if regra['uf_nova']:
-                                uf_el = eq_sadt.find('ans:UF', NS)
-                                if uf_el is not None: uf_el.text = regra['uf_nova']
-                                else:
-                                    uf_el = ET.Element(ans_tag('UF'))
-                                    uf_el.text = regra['uf_nova']
-                                    eq_sadt.append(uf_el)
-                                    
-                            if regra['cod_op_novo']:
-                                cod_prof_el = eq_sadt.find('ans:codProfissional', NS)
-                                if cod_prof_el is None:
-                                    cod_prof_el = ET.Element(ans_tag('codProfissional'))
-                                    eq_sadt.append(cod_prof_el)
+                        if regra['nome_novo']: nome_prof_elem.text = regra['nome_novo']
+                        
+                        if regra['crm_novo']:
+                            crm_el = eq_sadt.find('ans:numeroConselhoProfissional', NS)
+                            if crm_el is not None: crm_el.text = regra['crm_novo']
+                            else:
+                                crm_el = ET.Element(ans_tag('numeroConselhoProfissional'))
+                                crm_el.text = regra['crm_novo']
+                                eq_sadt.append(crm_el)
                                 
-                                op_el = cod_prof_el.find('ans:codigoPrestadorNaOperadora', NS)
-                                if op_el is not None: op_el.text = regra['cod_op_novo']
-                                else:
-                                    op_el = ET.Element(ans_tag('codigoPrestadorNaOperadora'))
-                                    op_el.text = regra['cod_op_novo']
-                                    cod_prof_el.append(op_el)
-                                    
-                            auditoria['medicos_trocados'].append(f"Guia SADT (Equipe Completa): Mapeamento de '{nome_orig_xml}' substituído com sucesso.")
+                        if regra['cbo_novo']:
+                            cbo_el = eq_sadt.find('ans:CBOS', NS)
+                            if cbo_el is not None: cbo_el.text = regra['cbo_novo']
+                            else:
+                                cbo_el = ET.Element(ans_tag('CBOS'))
+                                cbo_el.text = regra['cbo_novo']
+                                eq_sadt.append(cbo_el)
+                                
+                        if regra['grau_novo']:
+                            grau_el = eq_sadt.find('ans:grauPart', NS)
+                            if grau_el is not None: grau_el.text = regra['grau_novo']
+                            else:
+                                grau_el = ET.Element(ans_tag('grauPart'))
+                                grau_el.text = regra['grau_novo']
+                                eq_sadt.insert(0, grau_el)
+                                
+                        if regra['conselho_novo']:
+                            cons_el = eq_sadt.find('ans:conselho', NS)
+                            if cons_el is not None: cons_el.text = regra['conselho_novo']
+                            else:
+                                cons_el = ET.Element(ans_tag('conselho'))
+                                cons_el.text = regra['conselho_novo']
+                                eq_sadt.append(cons_el)
+                                
+                        if regra['uf_nova']:
+                            uf_el = eq_sadt.find('ans:UF', NS)
+                            if uf_el is not None: uf_el.text = regra['uf_nova']
+                            else:
+                                uf_el = ET.Element(ans_tag('UF'))
+                                uf_el.text = regra['uf_nova']
+                                eq_sadt.append(uf_el)
+                                
+                        if regra['cod_op_novo']:
+                            cod_prof_el = eq_sadt.find('ans:codProfissional', NS)
+                            if cod_prof_el is None:
+                                cod_prof_el = ET.Element(ans_tag('codProfissional'))
+                                eq_sadt.append(cod_prof_el)
+                            
+                            op_el = cod_prof_el.find('ans:codigoPrestadorNaOperadora', NS)
+                            if op_el is not None: op_el.text = regra['cod_op_novo']
+                            else:
+                                op_el = ET.Element(ans_tag('codigoPrestadorNaOperadora'))
+                                op_el.text = regra['cod_op_novo']
+                                cod_prof_el.append(op_el)
+                                
+                        auditoria['medicos_trocados'].append(f"Guia SADT (Equipe Completa): Mapeamento de '{nome_orig_xml}' substituído com sucesso.")
 
-            # --- PROCEDIMENTOS E CBOS DE MÉDICOS ---
-            procs_container = guia.find('.//ans:procedimentosExecutados', NS)
-            if procs_container is not None:
-                procs_para_remover = []
+
+        # =========================================================================
+        # REGRAS COMPLEMENTARES DE PROCEDIMENTOS, CBOS E REMOÇÕES
+        # =========================================================================
+        procs_container = guia.find('.//ans:procedimentosExecutados', NS)
+        if procs_container is not None:
+            procs_para_remover = []
+            
+            for proc_exec in procs_container.findall('ans:procedimentoExecutado', NS):
+                cod_proc_elem = proc_exec.find('.//ans:codigoProcedimento', NS)
+                cod_p = padronizar_codigo_8_digitos(cod_proc_elem.text) if cod_proc_elem is not None and cod_proc_elem.text else ""
                 
-                for proc_exec in procs_container.findall('ans:procedimentoExecutado', NS):
-                    cod_proc_elem = proc_exec.find('.//ans:codigoProcedimento', NS)
-                    cod_p = padronizar_codigo_8_digitos(cod_proc_elem.text) if cod_proc_elem is not None and cod_proc_elem.text else ""
+                is_protected = cod_p.startswith(('4', '2', '04', '02'))
+                equipes_iniciais = proc_exec.findall('ans:identEquipe', NS) + proc_exec.findall('ans:equipeSadt', NS)
+                equipes_remover = []
+                
+                for eq in equipes_iniciais:
+                    nome_prof_elem = eq.find('.//ans:nomeProf', NS)
+                    nome_prof = nome_prof_elem.text.strip().upper() if nome_prof_elem is not None and nome_prof_elem.text else ""
                     
-                    is_protected = cod_p.startswith(('4', '2', '04', '02'))
-                    equipes_iniciais = proc_exec.findall('ans:identEquipe', NS) + proc_exec.findall('ans:equipeSadt', NS)
-                    equipes_remover = []
+                    if tipo_guia == 'internacao' and eh_unimed_0014 and nome_prof in set_conveniados:
+                        if not is_protected:
+                            equipes_remover.append(eq)
+                            auditoria['conveniados_excluidos'].append(f"Removido médico(a) '{nome_prof}' do procedimento {cod_p} (Carteira: {numero_carteira})")
+                
+                for eq in equipes_remover:
+                    proc_exec.remove(eq)
+                
+                equipes_restantes = proc_exec.findall('ans:identEquipe', NS) + proc_exec.findall('ans:equipeSadt', NS)
+                if len(equipes_iniciais) > 0 and len(equipes_restantes) == 0:
+                    procs_para_remover.append(proc_exec)
+                    continue 
+                
+                # Ajustes de GrauPart, Via e Técnica nos procedimentos
+                if cod_p in dict_procedimentos:
+                    regra_p = dict_procedimentos[cod_p]
+                    detalhes_proc = []
                     
-                    for eq in equipes_iniciais:
-                        nome_prof_elem = eq.find('.//ans:nomeProf', NS)
-                        nome_prof = nome_prof_elem.text.strip().upper() if nome_prof_elem is not None and nome_prof_elem.text else ""
-                        
-                        if tipo_guia == 'internacao' and eh_unimed_0014 and nome_prof in set_conveniados:
-                            if not is_protected:
-                                equipes_remover.append(eq)
-                                auditoria['conveniados_excluidos'].append(f"Removido médico(a) '{nome_prof}' do procedimento {cod_p} (Carteira: {numero_carteira})")
-                    
-                    for eq in equipes_remover:
-                        proc_exec.remove(eq)
-                    
-                    equipes_restantes = proc_exec.findall('ans:identEquipe', NS) + proc_exec.findall('ans:equipeSadt', NS)
-                    if len(equipes_iniciais) > 0 and len(equipes_restantes) == 0:
-                        procs_para_remover.append(proc_exec)
-                        continue 
-                    
-                    if cod_p in dict_procedimentos:
-                        regra_p = dict_procedimentos[cod_p]
-                        detalhes_proc = []
-                        
-                        grau_val = limpar_numero(regra_p.get('Grau Part Obrigatório', ''))
-                        if grau_val:
-                            for eq in equipes_restantes:
-                                target_node = eq if tag_limpa(eq) == 'equipeSadt' else (eq.find('ans:identificacaoEquipe', NS) or eq)
-                                grau_elem = target_node.find('ans:grauPart', NS)
-                                if grau_elem is not None: grau_elem.text = grau_val
-                                else:
-                                    grau_elem = ET.Element(ans_tag('grauPart'))
-                                    grau_elem.text = grau_val
-                                    target_node.insert(0, grau_elem)
+                    grau_val = limpar_numero(regra_p.get('Grau Part Obrigatório', ''))
+                    if grau_val:
+                        for eq in equipes_restantes:
+                            if tag_limpa(eq) == 'equipeSadt': target_node = eq
+                            else:
+                                target_node = eq.find('ans:identificacaoEquipe', NS)
+                                if target_node is None: target_node = eq
                                 
-                                for parent in eq.iter():
-                                    for bad_grau in parent.findall('ans:grauParticipacao', NS): parent.remove(bad_grau)
-                                        
-                            detalhes_proc.append(f"Grau inserido: {grau_val}")
-                            
-                        quantidade_elem = proc_exec.find('ans:quantidadeExecutada', NS)
-                        indent_tail = quantidade_elem.tail if quantidade_elem is not None else None
-
-                        def _normaliza_via_tecnica(valor):
-                            return str(int(valor)) if valor.isdigit() else valor
-
-                        via_val = str(regra_p.get('Via de Acesso (1, 2 ou EXCLUIR)', '')).strip().upper()
-                        via_elem = proc_exec.find('ans:viaAcesso', NS)
-                        if via_val == 'EXCLUIR' and via_elem is not None:
-                            proc_exec.remove(via_elem)
-                            via_elem = None
-                            detalhes_proc.append("Via de Acesso excluída")
-                        elif via_val in ['1', '2', '01', '02']:
-                            via_val = _normaliza_via_tecnica(via_val)
-                            if via_elem is not None: via_elem.text = via_val
+                            grau_elem = target_node.find('ans:grauPart', NS)
+                            if grau_elem is not None: grau_elem.text = grau_val
                             else:
-                                via_elem = ET.Element(ans_tag('viaAcesso'))
-                                via_elem.text = via_val
-                                via_elem.tail = indent_tail
-                                proc_exec.insert(indice_apos(proc_exec, quantidade_elem), via_elem)
-                            detalhes_proc.append(f"Via de Acesso ajustada: {via_val}")
+                                grau_elem = ET.Element(ans_tag('grauPart'))
+                                grau_elem.text = grau_val
+                                target_node.insert(0, grau_elem)
                             
-                        tec_val = str(regra_p.get('Técnica (1, 2 ou EXCLUIR)', '')).strip().upper()
-                        tec_elem = proc_exec.find('ans:tecnicaUtilizada', NS)
-                        if tec_val == 'EXCLUIR' and tec_elem is not None:
-                            proc_exec.remove(tec_elem)
-                            detalhes_proc.append("Técnica excluída")
-                        elif tec_val in ['1', '2', '01', '02']:
-                            tec_val = _normaliza_via_tecnica(tec_val)
-                            if tec_elem is not None: tec_elem.text = tec_val
-                            else:
-                                tec_elem = ET.Element(ans_tag('tecnicaUtilizada'))
-                                tec_elem.text = tec_val
-                                tec_elem.tail = indent_tail
-                                ref_apos = via_elem if via_elem is not None else quantidade_elem
-                                proc_exec.insert(indice_apos(proc_exec, ref_apos), tec_elem)
-                            detalhes_proc.append(f"Técnica ajustada: {tec_val}")
-                            
-                        if detalhes_proc: auditoria['procedimentos_ajustados'].append(f"Proc {cod_p}: " + " | ".join(detalhes_proc))
-
-                    # AJUSTES DE CBO E CÓDIGO OPERADORA DOS MÉDICOS
-                    for eq in equipes_restantes:
-                        nome_prof_elem = eq.find('.//ans:nomeProf', NS)
-                        nome_prof = nome_prof_elem.text.strip().upper() if nome_prof_elem is not None and nome_prof_elem.text else ""
-                        
-                        if nome_prof in set_conveniados: continue 
-                        
-                        if nome_prof in dict_medicos:
-                            regra_m = dict_medicos[nome_prof]
-                            cbo_novo = limpar_numero(regra_m.get('CBO Correto', ''))
-                            
-                            target_node = eq if tag_limpa(eq) == 'equipeSadt' else (eq.find('ans:identificacaoEquipe', NS) or eq)
-
-                            # Busca qualquer tag de CBO existente na estrutura
-                            cbos_existentes = [elem for elem in eq.iter() if tag_limpa(elem) in ['CBOS', 'codigoCBOS', 'codigoCBO']]
-
-                            if cbo_novo != '':
-                                if cbos_existentes:
-                                    # Atualiza o CBO original diretamente
-                                    primeiro_cbo = cbos_existentes[0]
-                                    if primeiro_cbo.text != cbo_novo:
-                                        primeiro_cbo.text = cbo_novo
-                                        auditoria['cbos'].append(f"Médico(a) '{nome_prof}': CBO alterado para {cbo_novo}")
+                            for parent in eq.iter():
+                                for bad_grau in parent.findall('ans:grauParticipacao', NS): parent.remove(bad_grau)
                                     
-                                    # Se houver duplicatas por erro antigo, remove as extras
-                                    for c_extra in cbos_existentes[1:]:
-                                        for parent in eq.iter():
-                                            if c_extra in list(parent): parent.remove(c_extra)
-                                else:
-                                    # Insere o novo CBO dentro do nó correto (identificacaoEquipe / equipeSadt)
-                                    novo_cbo = ET.Element(ans_tag('CBOS'))
-                                    novo_cbo.text = cbo_novo
-                                    target_node.append(novo_cbo)
-                                    auditoria['cbos'].append(f"Médico(a) '{nome_prof}': CBO inserido ({cbo_novo})")
-                            
-                            substituir = str(regra_m.get('Substituir por Cód. Operadora', '')).strip().upper() == 'SIM'
-                            cod_operadora = limpar_numero(regra_m.get('Código na Operadora', ''))
-                            
-                            if substituir and cod_operadora != '':
-                                cod_prof_elem = eq.find('.//ans:codProfissional', NS)
-                                if cod_prof_elem is not None:
-                                    cpf_elem = cod_prof_elem.find('ans:cpfContratado', NS)
-                                    cod_op_elem = cod_prof_elem.find('ans:codigoPrestadorNaOperadora', NS)
-                                    if cpf_elem is not None:
-                                        cpf_elem.tag = ans_tag('codigoPrestadorNaOperadora')
-                                        cpf_elem.text = cod_operadora
-                                        auditoria['cbos'].append(f"Médico(a) '{nome_prof}': CPF -> Cód. Operadora {cod_operadora}")
-                                    elif cod_op_elem is not None:
-                                        cod_op_elem.text = cod_operadora
-                                        auditoria['cbos'].append(f"Médico(a) '{nome_prof}': Cód. Operadora alterado para {cod_operadora}")
-
-                for p in procs_para_remover: procs_container.remove(p)
-
-            # --- OUTRAS DESPESAS ---
-            despesas_container = guia.find('.//ans:outrasDespesas', NS)
-            if despesas_container is not None:
-                for despesa in despesas_container.findall('ans:despesa', NS):
-                    servicos = despesa.find('ans:servicosExecutados', NS)
-                    if servicos is not None:
-                        cod_item_elem = servicos.find('.//ans:codigoProcedimento', NS)
-                        cod_item = padronizar_codigo_8_digitos(cod_item_elem.text) if cod_item_elem is not None and cod_item_elem.text else ""
-                        cod_original_log = cod_item
+                        detalhes_proc.append(f"Grau inserido: {grau_val}")
                         
-                        if cod_item in dict_itens:
-                            cod_novo = dict_itens[cod_item]
-                            cod_item_elem.text = cod_novo
-                            cod_item = cod_novo
-                            auditoria['itens'].append(f"Item alterado de {cod_original_log} para {cod_novo}")
+                    # 🛠️ CORREÇÃO: viaAcesso e tecnicaUtilizada precisam ficar logo após
+                    # quantidadeExecutada (ordem exigida pelo schema TISS), nunca no final
+                    # de procedimentoExecutado (depois de identEquipe) — era isso que
+                    # gerava o erro "elemento viaAcesso não é esperado".
+                    quantidade_elem = proc_exec.find('ans:quantidadeExecutada', NS)
+                    # 🛠️ Captura o padrão de indentação/quebra de linha usado pelos irmãos
+                    # deste nível, para que tags recém-criadas herdem a mesma formatação
+                    # em vez de ficarem "grudadas" na mesma linha da tag anterior.
+                    indent_tail = quantidade_elem.tail if quantidade_elem is not None else None
 
-                        if cod_item in ['60034335', '60034343']:
-                            h_ini, h_fim, qtd_ex = servicos.find('ans:horaInicial', NS), servicos.find('ans:horaFinal', NS), servicos.find('ans:quantidadeExecutada', NS)
-                            if h_ini is not None and h_fim is not None and qtd_ex is not None:
-                                h_ini_novo, h_fim_novo, ok = calcular_tempo_oxigenio(h_ini.text, qtd_ex.text, cod_item)
-                                if ok:
-                                    if h_ini.text != h_ini_novo or h_fim.text != h_fim_novo:
-                                        auditoria['oxigenio'].append(f"Oxigênio {cod_item}: Hora Inicial/Final ajustadas para {h_ini_novo} / {h_fim_novo}")
-                                    h_ini.text = h_ini_novo
-                                    h_fim.text = h_fim_novo
-                                else:
-                                    auditoria['erros'].append(f"Item {cod_item}: não foi possível recalcular hora de O² (horaInicial='{h_ini.text}', qtd='{qtd_ex.text}') — mantido valor original")
+                    def _normaliza_via_tecnica(valor):
+                        # 🛠️ CORREÇÃO: o schema TISS não aceita zero à esquerda em
+                        # viaAcesso/tecnicaUtilizada — "01"/"02" precisam virar "1"/"2".
+                        return str(int(valor)) if valor.isdigit() else valor
 
-                        if cod_item in dict_unidades:
-                            unidade_elem = servicos.find('ans:unidadeMedida', NS)
-                            val_unidade = dict_unidades[cod_item].zfill(3) if dict_unidades[cod_item].isdigit() else dict_unidades[cod_item]
-                            if unidade_elem is not None: unidade_elem.text = val_unidade
+                    via_val = str(regra_p.get('Via de Acesso (1, 2 ou EXCLUIR)', '')).strip().upper()
+                    via_elem = proc_exec.find('ans:viaAcesso', NS)
+                    if via_val == 'EXCLUIR' and via_elem is not None:
+                        proc_exec.remove(via_elem)
+                        via_elem = None
+                        detalhes_proc.append("Via de Acesso excluída")
+                    elif via_val in ['1', '2', '01', '02']:
+                        via_val = _normaliza_via_tecnica(via_val)
+                        if via_elem is not None: via_elem.text = via_val
+                        else:
+                            via_elem = ET.Element(ans_tag('viaAcesso'))
+                            via_elem.text = via_val
+                            via_elem.tail = indent_tail
+                            proc_exec.insert(indice_apos(proc_exec, quantidade_elem), via_elem)
+                        detalhes_proc.append(f"Via de Acesso ajustada: {via_val}")
+                        
+                    # 🛠️ CORREÇÃO: a tag correta é 'tecnicaUtilizada' — 'tecnica' não existe
+                    # no schema TISS, por isso o valor nunca era encontrado/atualizado e uma
+                    # tag inválida extra era criada.
+                    tec_val = str(regra_p.get('Técnica (1, 2 ou EXCLUIR)', '')).strip().upper()
+                    tec_elem = proc_exec.find('ans:tecnicaUtilizada', NS)
+                    if tec_val == 'EXCLUIR' and tec_elem is not None:
+                        proc_exec.remove(tec_elem)
+                        detalhes_proc.append("Técnica excluída")
+                    elif tec_val in ['1', '2', '01', '02']:
+                        tec_val = _normaliza_via_tecnica(tec_val)
+                        if tec_elem is not None: tec_elem.text = tec_val
+                        else:
+                            tec_elem = ET.Element(ans_tag('tecnicaUtilizada'))
+                            tec_elem.text = tec_val
+                            tec_elem.tail = indent_tail
+                            # Insere logo após viaAcesso (se existir) ou após quantidadeExecutada
+                            ref_apos = via_elem if via_elem is not None else quantidade_elem
+                            proc_exec.insert(indice_apos(proc_exec, ref_apos), tec_elem)
+                        detalhes_proc.append(f"Técnica ajustada: {tec_val}")
+                        
+                    if detalhes_proc: auditoria['procedimentos_ajustados'].append(f"Proc {cod_p}: " + " | ".join(detalhes_proc))
+
+                # Ajustes de CBO e Código na Operadora para médicos cadastrados (Geral)
+                for eq in equipes_restantes:
+                    nome_prof_elem = eq.find('.//ans:nomeProf', NS)
+                    nome_prof = nome_prof_elem.text.strip().upper() if nome_prof_elem is not None and nome_prof_elem.text else ""
+                    
+                    if nome_prof in set_conveniados: continue 
+                    
+                    cbo_elem = eq.find('.//ans:CBOS', NS)
+                    if nome_prof in dict_medicos:
+                        regra_m = dict_medicos[nome_prof]
+                        cbo_novo = limpar_numero(regra_m['CBO Correto'])
+                        if cbo_elem is not None and cbo_novo != '':
+                            cbo_elem.text = cbo_novo
+                            auditoria['cbos'].append(f"Médico(a) '{nome_prof}': CBO alterado para {cbo_novo}")
+                        
+                        substituir = str(regra_m.get('Substituir por Cód. Operadora', '')).strip().upper() == 'SIM'
+                        cod_operadora = limpar_numero(regra_m.get('Código na Operadora', ''))
+                        
+                        if substituir and cod_operadora != '':
+                            cod_prof_elem = eq.find('.//ans:codProfissional', NS)
+                            if cod_prof_elem is not None:
+                                cpf_elem = cod_prof_elem.find('ans:cpfContratado', NS)
+                                cod_op_elem = cod_prof_elem.find('ans:codigoPrestadorNaOperadora', NS)
+                                if cpf_elem is not None:
+                                    cpf_elem.tag = ans_tag('codigoPrestadorNaOperadora')
+                                    cpf_elem.text = cod_operadora
+                                    auditoria['cbos'].append(f"Médico(a) '{nome_prof}': CPF -> Cód. Operadora {cod_operadora}")
+                                elif cod_op_elem is not None:
+                                    cod_op_elem.text = cod_operadora
+                                    auditoria['cbos'].append(f"Médico(a) '{nome_prof}': Cód. Operadora alterado para {cod_operadora}")
+
+            for p in procs_para_remover: procs_container.remove(p)
+
+        # --- OUTRAS DESPESAS ---
+        despesas_container = guia.find('.//ans:outrasDespesas', NS)
+        if despesas_container is not None:
+            for despesa in despesas_container.findall('ans:despesa', NS):
+                servicos = despesa.find('ans:servicosExecutados', NS)
+                if servicos is not None:
+                    cod_item_elem = servicos.find('.//ans:codigoProcedimento', NS)
+                    cod_item = padronizar_codigo_8_digitos(cod_item_elem.text) if cod_item_elem is not None and cod_item_elem.text else ""
+                    cod_original_log = cod_item
+                    
+                    if cod_item in dict_itens:
+                        cod_novo = dict_itens[cod_item]
+                        cod_item_elem.text = cod_novo
+                        cod_item = cod_novo
+                        auditoria['itens'].append(f"Item alterado de {cod_original_log} para {cod_novo}")
+
+                    if cod_item in ['60034335', '60034343']:
+                        h_ini, h_fim, qtd_ex = servicos.find('ans:horaInicial', NS), servicos.find('ans:horaFinal', NS), servicos.find('ans:quantidadeExecutada', NS)
+                        if h_ini is not None and h_fim is not None and qtd_ex is not None:
+                            h_novo, ok = calcular_tempo_oxigenio(h_ini.text, qtd_ex.text, cod_item)
+                            if ok:
+                                auditoria['oxigenio'].append(f"Oxigênio {cod_item}: Hora Final recalculada para {h_novo}")
+                                h_fim.text = h_novo
                             else:
-                                unidade_elem = ET.Element(ans_tag('unidadeMedida'))
-                                unidade_elem.text = val_unidade
-                                servicos.append(unidade_elem)
-                            auditoria['unidades'].append(f"Item {cod_item}: Unidade ajustada para {val_unidade}")
+                                auditoria['erros'].append(f"Item {cod_item}: não foi possível recalcular hora de O² (horaInicial='{h_ini.text}', qtd='{qtd_ex.text}') — mantido valor original")
 
-                        if cod_item in dict_anvisa:
-                            regra_a = dict_anvisa[cod_item]
-                            anvisa_alvo = limpar_numero(regra_a['Registro ANVISA'])
-                            ref_alvo = limpar_numero(regra_a['Ref. Fabricante'])
-                            add_anvisa = anvisa_alvo != "" and (servicos.find('ans:registroANVISA', NS) is None or not servicos.find('ans:registroANVISA', NS).text)
-                            add_ref = ref_alvo != "" and (servicos.find('ans:codigoRefFabricante', NS) is None or not servicos.find('ans:codigoRefFabricante', NS).text)
-                            if add_anvisa or add_ref:
-                                reordenar_servico_executado(servicos, anvisa_alvo if add_anvisa else None, ref_alvo if add_ref else None)
-                                detalhes_anv = []
-                                if add_anvisa: detalhes_anv.append(f"ANVISA {anvisa_alvo}")
-                                if add_ref: detalhes_anv.append(f"Ref {ref_alvo}")
-                                auditoria['anvisa'].append(f"Item {cod_item}: Inserido " + " e ".join(detalhes_anv))
+                    if cod_item in dict_unidades:
+                        unidade_elem = servicos.find('ans:unidadeMedida', NS)
+                        val_unidade = dict_unidades[cod_item].zfill(3) if dict_unidades[cod_item].isdigit() else dict_unidades[cod_item]
+                        if unidade_elem is not None: unidade_elem.text = val_unidade
+                        else:
+                            unidade_elem = ET.Element(ans_tag('unidadeMedida'))
+                            unidade_elem.text = val_unidade
+                            servicos.append(unidade_elem)
+                        auditoria['unidades'].append(f"Item {cod_item}: Unidade ajustada para {val_unidade}")
 
-        except Exception as e:
-            auditoria['erros'].append(f"Guia #{indice_guia} ({tipo_guia}): erro ao processar — {e}")
+                    if cod_item in dict_anvisa:
+                        regra_a = dict_anvisa[cod_item]
+                        anvisa_alvo = limpar_numero(regra_a['Registro ANVISA'])
+                        ref_alvo = limpar_numero(regra_a['Ref. Fabricante'])
+                        add_anvisa = anvisa_alvo != "" and (servicos.find('ans:registroANVISA', NS) is None or not servicos.find('ans:registroANVISA', NS).text)
+                        add_ref = ref_alvo != "" and (servicos.find('ans:codigoRefFabricante', NS) is None or not servicos.find('ans:codigoRefFabricante', NS).text)
+                        if add_anvisa or add_ref:
+                            reordenar_servico_executado(servicos, anvisa_alvo if add_anvisa else None, ref_alvo if add_ref else None)
+                            detalhes_anv = []
+                            if add_anvisa: detalhes_anv.append(f"ANVISA {anvisa_alvo}")
+                            if add_ref: detalhes_anv.append(f"Ref {ref_alvo}")
+                            auditoria['anvisa'].append(f"Item {cod_item}: Inserido " + " e ".join(detalhes_anv))
+
+      except Exception as e:
+        # 🛡️ Uma guia com problema (campo inesperado, formato divergente, etc.)
+        # não derruba mais o processamento do lote inteiro — o erro é
+        # registrado na auditoria e o processamento segue para as próximas guias.
+        auditoria['erros'].append(f"Guia #{indice_guia} ({tipo_guia}): erro ao processar — {e}")
 
     # --- RECALCULO DE HASH MD5 ---
     hash_node = root.find('.//ans:hash', NS)
@@ -533,11 +485,15 @@ def processar_xml_tiss(arquivo_xml, dfs):
     xml_bytes = xml_bytes.replace(b"<?xml version='1.0' encoding='ISO-8859-1'?>", b'<?xml version="1.0" encoding="ISO-8859-1"?>')
     xml_bytes = xml_bytes.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
 
+    # 🛠️ CORREÇÃO: quando o texto do nó <ans:hash> é vazio, o serializador do
+    # ElementTree escreve uma tag autofechada (<ans:hash/>) em vez de
+    # <ans:hash></ans:hash>. Isso fazia o replace abaixo nunca encontrar a tag
+    # e o hash final saía vazio. Normalizamos qualquer forma autofechada para
+    # o formato aberto/fechado antes de calcular e inserir o MD5.
     xml_bytes = re.sub(rb'<ans:hash\s*/>', b'<ans:hash></ans:hash>', xml_bytes)
 
     md5_hash = hashlib.md5(xml_bytes).hexdigest()
-    if hash_node is not None: 
-        xml_bytes = xml_bytes.replace(b'<ans:hash></ans:hash>', f'<ans:hash>{md5_hash}</ans:hash>'.encode('ISO-8859-1'))
+    if hash_node is not None: xml_bytes = xml_bytes.replace(b'<ans:hash></ans:hash>', f'<ans:hash>{md5_hash}</ans:hash>'.encode('ISO-8859-1'))
 
     return xml_bytes, auditoria
 
@@ -604,9 +560,7 @@ TITULOS_AMIGAVEIS_AUDITORIA = {
     'conveniados_excluidos': '🤝 Médicos Conveniados Removidos',
     'procedimentos_ajustados': '⚙️ Procedimentos Ajustados (Grau/Via/Técnica)',
     'guias_blindadas': '🛡️ Guia(s) Blindada(s)',
-    'erros': '⚠️ Avisos e Erros Durante o Processamento',
-    'valores_negativos': '➖ Valores Negativos Corrigidos',
-    'motivo_encerramento': '🚪 Motivo de Encerramento (11 ➔ 12)'
+    'erros': '⚠️ Avisos e Erros Durante o Processamento'
 }
 
 def botao_copiar_codigo(xml_str, key_sufixo):
@@ -618,7 +572,7 @@ def botao_copiar_codigo(xml_str, key_sufixo):
         cursor: pointer; font-size: 14px; font-weight: 600;
         transition: 0.2s; box-shadow: 0px 2px 4px rgba(0,0,0,0.1);
     " onmouseover="this.style.backgroundColor='#F5F5F5'" onmouseout="this.style.backgroundColor='#FFFFFF'">
-    📋 Copiar XML
+    📋 Copiar Código-Fonte para a Área de Transferência
     </button>
     <script>
     document.getElementById("cpBtn_{key_sufixo}").addEventListener("click", () => {{
@@ -629,7 +583,7 @@ def botao_copiar_codigo(xml_str, key_sufixo):
             b.style.color = "#155724";
             b.style.borderColor = "#C3E6CB";
             setTimeout(() => {{ 
-                b.innerText = "📋 Copiar XML"; 
+                b.innerText = "📋 Copiar Código-Fonte para a Área de Transferência"; 
                 b.style.backgroundColor = "#FFFFFF";
                 b.style.color = "#1E1E1E";
                 b.style.borderColor = "#CCCCCC";
@@ -640,179 +594,126 @@ def botao_copiar_codigo(xml_str, key_sufixo):
     """
     components.html(html_copiar, height=50)
 
-# --- ESTRUTURA DAS COLUNAS DA INTERFACE ---
-col1, col2 = st.columns([1, 1])
+col1, col2 = st.columns([1, 1.2], gap="large")
 
 with col1:
     with st.container(border=True):
-        st.markdown("### 📜 Processamento de XMLs em Lote")
-        st.caption("Arraste um ou múltiplos arquivos XML gerados pelo seu sistema.")
-
-        arquivos_xml = st.file_uploader(
-            "Selecione os arquivos XML",
-            type=["xml"],
-            accept_multiple_files=True,
-            key="uploader_xml_lote"
+        st.markdown("### 📜 Processamento do Lote XML")
+        st.markdown("Arraste um ou vários arquivos XML gerados pelo seu sistema aqui.")
+        xml_up = st.file_uploader(
+            "Arraste os arquivos XML", type=['xml'], label_visibility="collapsed",
+            accept_multiple_files=True
         )
 
-        if arquivos_xml:
-            st.info(f"📁 **{len(arquivos_xml)}** arquivo(s) selecionado(s).")
-
-        if st.button("🚀 Iniciar Correção Automática", type="primary", use_container_width=True):
-            if arquivos_xml:
-                resultados = []
-                dfs_para_processar = {
-                    aba: st.session_state.get(f'tab_{aba}', tabelas_padrao[aba])
-                    for aba in tabelas_padrao.keys()
-                }
-                
-                for arq in arquivos_xml:
+        if xml_up:
+            st.caption(f"{len(xml_up)} arquivo(s) selecionado(s).")
+            if st.button("🚀 Iniciar Correção Automática", type="primary", use_container_width=True):
+                dfs_atuais = {k: st.session_state[f'tab_{k}'] for k in tabelas_padrao.keys()}
+                resultados_lote = []
+                barra = st.progress(0.0, text="Processando arquivos...")
+                for i, arquivo in enumerate(xml_up):
+                    resultado = {'nome': arquivo.name, 'xml_bytes': None, 'auditoria': None, 'falha_total': None}
                     try:
-                        arq.seek(0)
-                        xml_bytes, aud = processar_xml_tiss(arq, dfs_para_processar)
-                        resultados.append({
-                            'nome': arq.name,
-                            'xml_bytes': xml_bytes,
-                            'auditoria': aud,
-                            'falha_total': None
-                        })
+                        xml_resultado, auditoria = processar_xml_tiss(arquivo, dfs_atuais)
+                        resultado['xml_bytes'] = xml_resultado
+                        resultado['auditoria'] = auditoria
                     except Exception as e:
-                        resultados.append({
-                            'nome': arq.name,
-                            'xml_bytes': None,
-                            'auditoria': {},
-                            'falha_total': str(e)
-                        })
-                st.session_state['resultados_lote'] = resultados
-                st.rerun()
-            else:
-                st.warning("Por favor, selecione pelo menos um arquivo XML.")
+                        # Falha ao nível do arquivo inteiro (ex: XML mal formado) —
+                        # não impede que os demais arquivos do lote sejam processados.
+                        resultado['falha_total'] = str(e)
+                    resultados_lote.append(resultado)
+                    barra.progress((i + 1) / len(xml_up), text=f"Processando arquivos... ({i+1}/{len(xml_up)})")
+                barra.empty()
+                st.session_state['resultados_lote'] = resultados_lote
 
 with col2:
-    if 'resultados_lote' in st.session_state and st.session_state['resultados_lote']:
-        resultados = st.session_state['resultados_lote']
-        
+    if 'resultados_lote' in st.session_state:
+        resultados_lote = st.session_state['resultados_lote']
+        sucesso = [r for r in resultados_lote if r['falha_total'] is None]
+        falhas = [r for r in resultados_lote if r['falha_total'] is not None]
+
         with st.container(border=True):
             st.markdown("### 📊 Resultado da Auditoria")
+            st.caption(f"{len(sucesso)} de {len(resultados_lote)} arquivo(s) processado(s) com sucesso.")
 
-            if len(resultados) > 1:
-                nomes_arquivos = [r['nome'] for r in resultados]
-                
-                zip_buffer = io.BytesIO()
-                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-                    for res in resultados:
-                        if res['xml_bytes']:
-                            zip_file.writestr(f"PRONTO_{res['nome']}", res['xml_bytes'])
-                zip_buffer.seek(0)
+            if falhas:
+                with st.expander(f"❌ {len(falhas)} arquivo(s) com falha total no processamento", expanded=True):
+                    for r in falhas:
+                        st.error(f"**{r['nome']}**: {r['falha_total']}")
 
-                st.download_button(
-                    label="📦 Baixar Todos os XMLs Corrigidos (.ZIP)",
-                    data=zip_buffer,
-                    file_name="XMLS_CORRIGIDOS.zip",
-                    mime="application/zip",
-                    type="primary",
-                    use_container_width=True
-                )
-                
-                st.divider()
+            if sucesso:
+                # Métricas agregadas de todo o lote
+                aud_total = {chave: [] for chave in TITULOS_AMIGAVEIS_AUDITORIA}
+                for r in sucesso:
+                    for chave, lista in r['auditoria'].items():
+                        aud_total.setdefault(chave, []).extend(lista)
 
-                nome_selecionado = st.selectbox(
-                    "🔍 Selecione o arquivo para visualizar os detalhes:",
-                    options=nomes_arquivos
-                )
-                resultado = next(r for r in resultados if r['nome'] == nome_selecionado)
-            else:
-                resultado = resultados[0]
+                c1, c2, c3 = st.columns(3)
+                c1.metric("🔀 Médicos Trocados", len(aud_total['medicos_trocados']))
+                c2.metric("👩‍⚕️ CBOs / Códs", len(aud_total['cbos']))
+                c3.metric("🤝 Conveniados Remov.", len(aud_total['conveniados_excluidos']))
 
-            if resultado.get('falha_total'):
-                st.error(f"❌ **{resultado['nome']}**: {resultado['falha_total']}")
-            else:
-                st.success(f"✅ Arquivo **{resultado['nome']}** processado com sucesso!")
+                c4, c5, c6 = st.columns(3)
+                c4.metric("🔄 Itens Traduzidos", len(aud_total['itens']))
+                c5.metric("📦 Unid. Medida", len(aud_total['unidades']))
+                c6.metric("⏱️ Tempos O²", len(aud_total['oxigenio']))
 
-                xml_bytes = resultado['xml_bytes']
-                try:
-                    xml_texto = xml_bytes.decode('ISO-8859-1')
-                except (UnicodeDecodeError, AttributeError):
-                    xml_texto = xml_bytes.decode('utf-8', errors='replace') if isinstance(xml_bytes, bytes) else xml_bytes
+                c7, c8, c9 = st.columns(3)
+                c7.metric("⚙️ Procs. Ajustados", len(aud_total['procedimentos_ajustados']))
+                c8.metric("🩺 Itens ANVISA", len(aud_total['anvisa']))
+                c9.metric("🛡️ Guia(s) Blindada(s)", len(aud_total['guias_blindadas']))
 
-                aud = resultado.get('auditoria', {})
-
-                st.divider()
-                st.markdown("#### 📈 Resumo das Alterações")
-                
-                c1_m, c2_m, c3_m = st.columns(3)
-                c1_m.metric("🔀 Médicos Trocados", len(aud.get('medicos_trocados', [])))
-                c2_m.metric("👩‍⚕️ CBOs / Códs", len(aud.get('cbos', [])))
-                c3_m.metric("➖ Valores Negativos", len(aud.get('valores_negativos', [])))
-
-                c4_m, c5_m, c6_m = st.columns(3)
-                c4_m.metric("🚪 Motivo Enc. (11➔12)", len(aud.get('motivo_encerramento', [])))
-                c5_m.metric("🔄 Itens Traduzidos", len(aud.get('itens', [])))
-                c6_m.metric("📦 Unid. Medida", len(aud.get('unidades', [])))
-
-                c7_m, c8_m, c9_m = st.columns(3)
-                c7_m.metric("⏱️ Tempos O²", len(aud.get('oxigenio', [])))
-                c8_m.metric("⚙️ Procs. Ajustados", len(aud.get('procedimentos_ajustados', [])))
-                c9_m.metric("🛡️ Guia(s) Blindada(s)", len(aud.get('guias_blindadas', [])))
-
-                if aud.get('erros'):
-                    st.warning(f"⚠️ {len(aud['erros'])} aviso(s)/erro(s) pontual(is) durante o processamento.")
+                if aud_total.get('erros'):
+                    st.warning(f"⚠️ {len(aud_total['erros'])} aviso(s)/erro(s) pontual(is) durante o processamento — veja os detalhes por arquivo abaixo.")
 
                 st.divider()
 
-                st.markdown("#### 🚀 Ações Individuais")
-                
-                st.markdown("""
-                    <style>
-                    div[data-testid="stCustomComponentV1"] {
-                        margin-top: 0px !important;
-                        padding-top: 0px !important;
-                    }
-                    div[data-testid="stCustomComponentV1"] iframe {
-                        display: block;
-                        vertical-align: middle;
-                    }
-                    </style>
-                """, unsafe_allow_html=True)
-
-                c1, c2 = st.columns(2, vertical_alignment="bottom")
-                
-                with c1:
+                # Download em lote (ZIP) quando há mais de um arquivo processado com sucesso
+                if len(sucesso) > 1:
+                    zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+                        for r in sucesso:
+                            zf.writestr(f"PRONTO_{r['nome']}", r['xml_bytes'])
                     st.download_button(
-                        label="📥 Baixar XML Validado",
-                        data=xml_bytes,
-                        file_name=f"PRONTO_{resultado['nome']}",
-                        mime="application/xml",
+                        label=f"📦 Baixar Todos os {len(sucesso)} XMLs Validados (.zip)",
+                        data=zip_buffer.getvalue(),
+                        file_name="lote_tiss_validado.zip",
+                        mime="application/zip",
                         type="primary",
-                        use_container_width=True,
-                        key=f"dl_{resultado['nome']}"
+                        use_container_width=True
                     )
-                    
-                with c2:
-                    botao_copiar_codigo(xml_texto, key_sufixo=f"copia_{resultado['nome']}")
+                    st.divider()
 
-                st.divider()
-
-                with st.expander("📝 Ver Detalhes das Modificações"):
-                    tem_alteracao = False
-                    if isinstance(aud, dict):
+                st.markdown("#### 📄 Detalhes por arquivo")
+                for idx, r in enumerate(sucesso):
+                    aud = r['auditoria']
+                    with st.expander(f"**{r['nome']}**"):
+                        tem_alteracao = False
                         for chave, lista_logs in aud.items():
                             if lista_logs:
                                 tem_alteracao = True
                                 st.markdown(f"**{TITULOS_AMIGAVEIS_AUDITORIA.get(chave, chave)}**")
-                                for item in lista_logs:
-                                    st.caption(f"• {item}")
+                                for item in lista_logs: st.caption(f"• {item}")
                                 st.markdown("---")
-                    
-                    if not tem_alteracao:
-                        st.info("Nenhuma alteração foi necessária neste XML.")
+                        if not tem_alteracao: st.info("Nenhuma alteração foi realizada neste XML.")
 
-                with st.expander("🔍 Inspecionar Código Visualmente"):
-                    st.code(xml_texto, language='xml')
+                        st.download_button(
+                            label="📥 Baixar XML Validado",
+                            data=r['xml_bytes'],
+                            file_name=f"PRONTO_{r['nome']}",
+                            mime="application/xml",
+                            type="primary",
+                            use_container_width=True,
+                            key=f"download_{idx}_{r['nome']}"
+                        )
 
+                        xml_str = r['xml_bytes'].decode('ISO-8859-1')
+                        botao_copiar_codigo(xml_str, key_sufixo=f"{idx}")
+
+                        with st.expander("🔍 Inspecionar Código Visualmente"):
+                            st.code(xml_str, language='xml')
     else:
-        with st.container(border=True):
-            st.info("Aguardando arquivo(s) XML. Faça o upload na coluna ao lado.")
+        with st.container(border=True): st.info("Aguardando arquivo XML. Faça o upload na coluna ao lado.")
 
 st.markdown("<br>", unsafe_allow_html=True)
 

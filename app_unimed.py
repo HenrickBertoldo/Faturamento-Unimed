@@ -182,6 +182,28 @@ def _somar_segundos(hora_str, segundos):
     t = datetime.strptime(hora_str.strip(), "%H:%M:%S")
     return (t + timedelta(seconds=segundos)).strftime("%H:%M:%S")
 
+def calcular_hash_tiss(root, hash_node):
+    """🛠️ ALGORITMO OFICIAL DA ANS para o hash do Padrão TISS (confirmado com a
+    Unimed/Validador TISS): NÃO é o MD5 dos bytes do arquivo inteiro — é o MD5
+    da CONCATENAÇÃO do conteúdo (sem as tags) de todos os elementos-folha, na
+    ordem em que aparecem no documento, usando ISO-8859-1. Tags vazias, ou que
+    só contêm espaço/tab/quebra de linha, não entram no cálculo. Como o cálculo
+    não depende de nenhum detalhe de formatação/serialização do XML (tags
+    autofechadas, indentação, quebra de linha), ele é imune ao tipo de
+    divergência de bytes que causava os erros "Hash inválido" na importação."""
+    partes = []
+    for elem in root.iter():
+        if elem is hash_node:
+            continue  # o próprio hash é sempre tratado como vazio no cálculo
+        if len(list(elem)) > 0:
+            continue  # só elementos-folha (sem filhos) contam
+        texto = elem.text
+        if texto is None or texto.strip() == '':
+            continue  # tags vazias ou só com espaço/tab/quebra de linha não contam
+        partes.append(texto)
+    concatenado = ''.join(partes)
+    return hashlib.md5(concatenado.encode('ISO-8859-1')).hexdigest()
+
 def ajustar_horarios_duplicados(procs_container, auditoria):
     """🆕 NOVA REGRA: quando um procedimento é dividido em vários itens de
     quantidadeExecutada=1 (em vez de um único item com quantidade > 1), a
@@ -569,21 +591,20 @@ def processar_xml_tiss(arquivo_xml, dfs):
         except Exception as e:
             auditoria['erros'].append(f"Guia #{indice_guia} ({tipo_guia}): erro ao processar — {e}")
 
-    # --- RECALCULO DE HASH MD5 ---
+    # --- RECALCULO DE HASH (algoritmo OFICIAL da ANS: MD5 da concatenação do
+    # conteúdo dos elementos-folha, na ordem do documento — não depende de
+    # nenhum detalhe de formatação/serialização do XML) ---
     hash_node = root.find('.//ans:hash', NS)
-    if hash_node is not None: hash_node.text = ""
+    if hash_node is not None:
+        hash_node.text = ""
+        md5_hash = calcular_hash_tiss(root, hash_node)
+        hash_node.text = md5_hash
 
     temp_buffer = io.BytesIO()
     tree.write(temp_buffer, encoding='ISO-8859-1', xml_declaration=True)
     xml_bytes = temp_buffer.getvalue()
     xml_bytes = xml_bytes.replace(b"<?xml version='1.0' encoding='ISO-8859-1'?>", b'<?xml version="1.0" encoding="ISO-8859-1"?>')
     xml_bytes = xml_bytes.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
-
-    xml_bytes = re.sub(rb'<ans:hash\s*/>', b'<ans:hash></ans:hash>', xml_bytes)
-
-    md5_hash = hashlib.md5(xml_bytes).hexdigest()
-    if hash_node is not None: 
-        xml_bytes = xml_bytes.replace(b'<ans:hash></ans:hash>', f'<ans:hash>{md5_hash}</ans:hash>'.encode('ISO-8859-1'))
 
     return xml_bytes, auditoria
 

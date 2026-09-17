@@ -20,6 +20,12 @@ st.markdown("""
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
+    /* Editor de XML com aparência de editor de código */
+    div[data-testid="stTextArea"] textarea {
+        font-family: 'Consolas', 'Courier New', monospace !important;
+        font-size: 13px !important;
+        line-height: 1.4 !important;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -239,6 +245,55 @@ def ajustar_horarios_duplicados(procs_container, auditoria):
             f"Procedimento {cod_p} em {data_exec}: {len(ocorrencias)} ocorrências no horário {h_ini_orig} "
             f"— {len(ocorrencias) - 1} escalonada(s) em +1s, +2s... para evitar crítica 'Serviço duplicado'."
         )
+
+def recalcular_hash_e_serializar(tree, root):
+    """Recebe uma árvore ElementTree já com os dados finais e devolve os bytes
+    prontos para gravação: recalcula o hash (algoritmo oficial ANS) e serializa
+    em ISO-8859-1 com quebras de linha CRLF. Usada tanto pelo motor automático
+    (processar_xml_tiss) quanto pelo salvamento manual no editor de XML —
+    garante que os dois caminhos gerem hash de forma idêntica."""
+    hash_node = root.find('.//ans:hash', NS)
+    if hash_node is not None:
+        hash_node.text = ""
+        md5_hash = calcular_hash_tiss(root, hash_node)
+        hash_node.text = md5_hash
+
+    temp_buffer = io.BytesIO()
+    tree.write(temp_buffer, encoding='ISO-8859-1', xml_declaration=True)
+    xml_bytes = temp_buffer.getvalue()
+    xml_bytes = xml_bytes.replace(b"<?xml version='1.0' encoding='ISO-8859-1'?>", b'<?xml version="1.0" encoding="ISO-8859-1"?>')
+    xml_bytes = xml_bytes.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
+    return xml_bytes
+
+def validar_e_recalcular_xml_editado(texto_editado):
+    """Usada pelo editor manual (Salvar alterações / Localizar e Substituir).
+    Tenta interpretar o texto do editor como XML válido e, se conseguir,
+    recalcula o hash com a MESMA função usada pelo motor automático.
+    Retorna (xml_bytes_ou_None, mensagem_de_erro_ou_None)."""
+    try:
+        xml_encodado = texto_editado.encode('ISO-8859-1')
+    except UnicodeEncodeError as e:
+        return None, f"O texto contém um caractere fora do padrão ISO-8859-1 (posição {e.start}: '{texto_editado[e.start:e.start+1]}'). Remova ou substitua esse caractere antes de salvar."
+
+    try:
+        root = ET.fromstring(xml_encodado)
+    except ET.ParseError as e:
+        return None, f"XML inválido — não é possível salvar: {e}"
+
+    tree = ET.ElementTree(root)
+    try:
+        xml_bytes = recalcular_hash_e_serializar(tree, root)
+    except Exception as e:
+        return None, f"Falha ao recalcular o hash/serializar o XML: {e}"
+    return xml_bytes, None
+
+def _extrair_hash_do_texto(texto):
+    """Extrai o valor atualmente escrito dentro de <ans:hash>...</ans:hash> a
+    partir do texto bruto (via regex, não exige XML bem formado — útil para
+    exibir o hash mesmo enquanto o usuário está editando o XML no meio do
+    processo, antes de salvar)."""
+    m = re.search(r'<ans:hash>([^<]*)</ans:hash>', texto)
+    return m.group(1).strip() if m else None
 
 def processar_xml_tiss(arquivo_xml, dfs):
     auditoria = {
@@ -594,17 +649,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
     # --- RECALCULO DE HASH (algoritmo OFICIAL da ANS: MD5 da concatenação do
     # conteúdo dos elementos-folha, na ordem do documento — não depende de
     # nenhum detalhe de formatação/serialização do XML) ---
-    hash_node = root.find('.//ans:hash', NS)
-    if hash_node is not None:
-        hash_node.text = ""
-        md5_hash = calcular_hash_tiss(root, hash_node)
-        hash_node.text = md5_hash
-
-    temp_buffer = io.BytesIO()
-    tree.write(temp_buffer, encoding='ISO-8859-1', xml_declaration=True)
-    xml_bytes = temp_buffer.getvalue()
-    xml_bytes = xml_bytes.replace(b"<?xml version='1.0' encoding='ISO-8859-1'?>", b'<?xml version="1.0" encoding="ISO-8859-1"?>')
-    xml_bytes = xml_bytes.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
+    xml_bytes = recalcular_hash_e_serializar(tree, root)
 
     return xml_bytes, auditoria
 
@@ -752,6 +797,7 @@ with col1:
                             'falha_total': str(e)
                         })
                 st.session_state['resultados_lote'] = resultados
+                st.session_state['lote_id'] = st.session_state.get('lote_id', 0) + 1
                 st.rerun()
             else:
                 st.warning("Por favor, selecione pelo menos um arquivo XML.")
@@ -828,40 +874,152 @@ with col2:
 
                 st.divider()
 
-                st.markdown("#### 🚀 Ações Individuais")
-                
-                st.markdown("""
-                    <style>
-                    div[data-testid="stCustomComponentV1"] {
-                        margin-top: 0px !important;
-                        padding-top: 0px !important;
-                    }
-                    div[data-testid="stCustomComponentV1"] iframe {
-                        display: block;
-                        vertical-align: middle;
-                    }
-                    </style>
-                """, unsafe_allow_html=True)
+                # ==========================================
+                # EDITOR DE XML — edição direta dentro do Streamlit
+                # ==========================================
+                nome_arquivo = resultado['nome']
+                lote_id = st.session_state.get('lote_id', 0)
+                editor_key = f"editor_texto_{lote_id}_{nome_arquivo}"
+                baseline_key = f"editor_baseline_{lote_id}_{nome_arquivo}"
+                hash_original_key = f"hash_original_{lote_id}_{nome_arquivo}"
+                hash_atual_key = f"hash_atual_{lote_id}_{nome_arquivo}"
+                ja_salvou_key = f"ja_salvou_{lote_id}_{nome_arquivo}"
+                proximo_idx_key = f"proximo_idx_{lote_id}_{nome_arquivo}"
+                erro_validacao_key = f"erro_validacao_{lote_id}_{nome_arquivo}"
 
-                c1, c2 = st.columns(2, vertical_alignment="bottom")
-                
-                with c1:
-                    st.download_button(
-                        label="📥 Baixar XML Validado",
-                        data=xml_bytes,
-                        file_name=f"PRONTO_{resultado['nome']}",
-                        mime="application/xml",
-                        type="primary",
-                        use_container_width=True,
-                        key=f"dl_{resultado['nome']}"
-                    )
-                    
-                with c2:
-                    botao_copiar_codigo(xml_texto, key_sufixo=f"copia_{resultado['nome']}")
+                # Inicialização (uma única vez, na primeira vez que este arquivo é exibido)
+                if editor_key not in st.session_state:
+                    st.session_state[editor_key] = xml_texto
+                    st.session_state[baseline_key] = xml_texto
+                    st.session_state[hash_original_key] = _extrair_hash_do_texto(xml_texto)
+                    st.session_state[hash_atual_key] = st.session_state[hash_original_key]
+                    st.session_state[ja_salvou_key] = False
+                    st.session_state[proximo_idx_key] = 0
+                    st.session_state[erro_validacao_key] = None
+
+                st.markdown("#### ✏️ Editor de XML")
+                st.caption("Edite o conteúdo diretamente aqui. As alterações só valem para o arquivo final depois de clicar em **Salvar alterações**.")
+
+                # Reserva o espaço visual do editor no topo. Ele só é efetivamente
+                # desenhado mais abaixo (depois da lógica de Localizar/Substituir),
+                # para que os botões possam atualizar seu conteúdo dentro do mesmo clique.
+                editor_placeholder = st.empty()
+
+                st.markdown("#### 🔎 Localizar e Substituir")
+                col_loc1, col_loc2 = st.columns(2)
+                with col_loc1:
+                    termo_localizar = st.text_input("Localizar", key=f"loc_localizar_{lote_id}_{nome_arquivo}")
+                with col_loc2:
+                    termo_substituir = st.text_input("Substituir por", key=f"loc_substituir_{lote_id}_{nome_arquivo}")
+
+                col_b1, col_b2, col_b3 = st.columns(3)
+                with col_b1:
+                    clicou_localizar = st.button("🔍 Localizar", key=f"btn_localizar_{lote_id}_{nome_arquivo}", use_container_width=True)
+                with col_b2:
+                    clicou_proximo = st.button("⏭️ Substituir próximo", key=f"btn_proximo_{lote_id}_{nome_arquivo}", use_container_width=True)
+                with col_b3:
+                    clicou_todos = st.button("🔁 Substituir todos", key=f"btn_todos_{lote_id}_{nome_arquivo}", use_container_width=True)
+
+                if clicou_localizar:
+                    if not termo_localizar:
+                        st.warning("Informe o texto a localizar.")
+                    else:
+                        ocorrencias = st.session_state[editor_key].count(termo_localizar)
+                        st.session_state[proximo_idx_key] = 0
+                        st.info(f"🔍 **{ocorrencias}** ocorrência(s) encontrada(s) para '{termo_localizar}'.")
+
+                if clicou_proximo:
+                    if not termo_localizar:
+                        st.warning("Informe o texto a localizar.")
+                    else:
+                        texto_atual_edicao = st.session_state[editor_key]
+                        pos = texto_atual_edicao.find(termo_localizar, st.session_state[proximo_idx_key])
+                        if pos == -1:
+                            pos = texto_atual_edicao.find(termo_localizar)  # tenta novamente a partir do início
+                        if pos == -1:
+                            st.warning(f"Nenhuma ocorrência de '{termo_localizar}' encontrada.")
+                        else:
+                            novo_texto = texto_atual_edicao[:pos] + termo_substituir + texto_atual_edicao[pos + len(termo_localizar):]
+                            st.session_state[editor_key] = novo_texto
+                            st.session_state[proximo_idx_key] = pos + len(termo_substituir)
+                            st.success(f"1 ocorrência substituída (posição {pos}).")
+
+                if clicou_todos:
+                    if not termo_localizar:
+                        st.warning("Informe o texto a localizar.")
+                    else:
+                        texto_atual_edicao = st.session_state[editor_key]
+                        qtd = texto_atual_edicao.count(termo_localizar)
+                        st.session_state[editor_key] = texto_atual_edicao.replace(termo_localizar, termo_substituir)
+                        st.session_state[proximo_idx_key] = 0
+                        st.success(f"✅ {qtd} ocorrência(s) substituída(s).")
+
+                # Só agora o editor é de fato desenhado — já reflete qualquer
+                # substituição feita pelos botões acima, neste mesmo clique.
+                editor_placeholder.text_area(
+                    "Conteúdo do XML",
+                    key=editor_key,
+                    height=480,
+                    label_visibility="collapsed"
+                )
+
+                texto_atual = st.session_state[editor_key]
+                alterado = texto_atual != st.session_state[baseline_key]
 
                 st.divider()
+                st.markdown("#### 💾 Salvar Alterações")
 
-                with st.expander("📝 Ver Detalhes das Modificações"):
+                col_status, col_hash = st.columns(2)
+                with col_status:
+                    if alterado:
+                        st.warning("🟡 Alterações não salvas")
+                    elif st.session_state[ja_salvou_key]:
+                        st.success("🟢 Alterações salvas")
+                    else:
+                        st.info("🟢 Arquivo original (sem alterações)")
+
+                with col_hash:
+                    st.caption(f"**Hash original:** `{st.session_state[hash_original_key] or '—'}`")
+                    st.caption(f"**Hash atual:** `{st.session_state[hash_atual_key] or '—'}`")
+
+                if st.session_state[erro_validacao_key]:
+                    st.error(f"❌ {st.session_state[erro_validacao_key]}")
+
+                if st.button("💾 Salvar alterações", type="primary", use_container_width=True,
+                             disabled=not alterado, key=f"btn_salvar_{lote_id}_{nome_arquivo}"):
+                    novos_bytes, erro = validar_e_recalcular_xml_editado(texto_atual)
+                    if erro:
+                        st.session_state[erro_validacao_key] = erro
+                        st.rerun()
+                    else:
+                        st.session_state[erro_validacao_key] = None
+                        novo_texto_final = novos_bytes.decode('ISO-8859-1')
+                        st.session_state[editor_key] = novo_texto_final
+                        st.session_state[baseline_key] = novo_texto_final
+                        st.session_state[hash_atual_key] = _extrair_hash_do_texto(novo_texto_final)
+                        st.session_state[ja_salvou_key] = True
+                        resultado['xml_bytes'] = novos_bytes
+                        st.rerun()
+
+                st.divider()
+                st.markdown("#### 📎 Ações Secundárias")
+
+                xml_bytes_atuais = resultado['xml_bytes']
+
+                cA, cB = st.columns(2, vertical_alignment="bottom")
+                with cA:
+                    st.download_button(
+                        label="📥 Baixar XML",
+                        data=xml_bytes_atuais,
+                        file_name=f"PRONTO_{nome_arquivo}",
+                        mime="application/xml",
+                        use_container_width=True,
+                        key=f"dl_{lote_id}_{nome_arquivo}"
+                    )
+                with cB:
+                    botao_copiar_codigo(texto_atual, key_sufixo=f"copia_{lote_id}_{nome_arquivo}")
+
+                with st.expander("📝 Ver Detalhes das Modificações Automáticas"):
                     tem_alteracao = False
                     if isinstance(aud, dict):
                         for chave, lista_logs in aud.items():
@@ -871,12 +1029,8 @@ with col2:
                                 for item in lista_logs:
                                     st.caption(f"• {item}")
                                 st.markdown("---")
-                    
                     if not tem_alteracao:
                         st.info("Nenhuma alteração foi necessária neste XML.")
-
-                with st.expander("🔍 Inspecionar Código Visualmente"):
-                    st.code(xml_texto, language='xml')
 
     else:
         with st.container(border=True):

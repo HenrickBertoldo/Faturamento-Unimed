@@ -2,3 +2,4 @@ streamlit
 pandas
 xlsxwriter
 st-gsheets-connection
+streamlit-ace

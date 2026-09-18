@@ -2,6 +2,8 @@ import hashlib
 import re
 import zipfile
 import traceback
+import difflib
+import html
 import streamlit as st
 import xml.etree.ElementTree as ET
 import pandas as pd
@@ -9,6 +11,7 @@ import io
 import streamlit.components.v1 as components
 from datetime import datetime, timedelta
 from streamlit_gsheets import GSheetsConnection
+from streamlit_ace import st_ace
 
 # ==========================================
 # CONFIGURAÇÃO DA PÁGINA 
@@ -20,7 +23,67 @@ st.markdown("""
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
-    /* Editor de XML com aparência de editor de código */
+
+    /* Reduz o espaçamento padrão do Streamlit para uma aparência mais compacta,
+       de ferramenta profissional, e não de "página web com cards grandes" */
+    .block-container {
+        padding-top: 1rem !important;
+        padding-bottom: 1rem !important;
+        max-width: 100% !important;
+    }
+
+    /* Cabeçalho tipo aplicativo desktop */
+    .tiss-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        background-color: #f3f4f6;
+        border: 1px solid #d1d5db;
+        border-radius: 4px;
+        padding: 0.5rem 0.9rem;
+        margin-bottom: 0.5rem;
+    }
+    .tiss-header .app-name { font-weight: 700; font-size: 0.95rem; color: #1f2937; }
+    .tiss-header .file-name { font-weight: 600; font-size: 0.95rem; color: #374151; margin-left: 0.6rem; }
+    .tiss-header .file-name.modificado { color: #b45309; }
+
+    /* Barra de status inferior, tipo IDE */
+    .tiss-statusbar {
+        display: flex;
+        gap: 1.4rem;
+        align-items: center;
+        background-color: #f3f4f6;
+        border: 1px solid #d1d5db;
+        border-radius: 4px;
+        padding: 0.35rem 0.9rem;
+        font-size: 0.82rem;
+        color: #374151;
+        margin-top: 0.4rem;
+    }
+    .tiss-statusbar .ok { color: #15803d; font-weight: 600; }
+    .tiss-statusbar .erro { color: #b91c1c; font-weight: 600; }
+    .tiss-statusbar .alterado { color: #b45309; font-weight: 600; }
+
+    /* Painel de alterações — lista compacta tipo "diff" */
+    .tiss-diff-item {
+        border-left: 3px solid #d97706;
+        background-color: #fffbeb;
+        padding: 0.35rem 0.5rem;
+        margin-bottom: 0.4rem;
+        border-radius: 2px;
+        font-size: 0.8rem;
+    }
+    .tiss-diff-item .linha { color: #92400e; font-weight: 700; font-size: 0.75rem; }
+    .tiss-diff-item .campo { color: #1f2937; font-weight: 600; }
+    .tiss-diff-item .valores { color: #4b5563; font-family: 'Consolas', 'Courier New', monospace; font-size: 0.75rem; }
+
+    /* Botões da barra de ferramentas mais compactos e "quadrados" (menos cardizado) */
+    div[data-testid="stHorizontalBlock"] button {
+        border-radius: 4px !important;
+    }
+
+    /* Editor de XML com aparência de editor de código (fallback para qualquer
+       textarea remanescente na aplicação) */
     div[data-testid="stTextArea"] textarea {
         font-family: 'Consolas', 'Courier New', monospace !important;
         font-size: 13px !important;
@@ -295,6 +358,60 @@ def _extrair_hash_do_texto(texto):
     processo, antes de salvar)."""
     m = re.search(r'<ans:hash>([^<]*)</ans:hash>', texto)
     return m.group(1).strip() if m else None
+
+_PADRAO_TAG_LINHA = re.compile(r'<([\w:.-]+)>([^<]*)</\1>')
+
+def calcular_diff_alteracoes(texto_base, texto_atual):
+    """Gera uma lista aproximada de alterações (linha, campo, valor antigo,
+    valor novo) comparando o texto linha a linha com difflib. Funciona bem
+    para o padrão típico do TISS (uma tag por linha) — não é um diff XML
+    semântico perfeito: se o usuário reformatar/reindentar um trecho inteiro,
+    a mudança aparece de forma mais genérica (sem valor antigo/novo isolado)."""
+    linhas_base = texto_base.splitlines()
+    linhas_atual = texto_atual.splitlines()
+    sm = difflib.SequenceMatcher(None, linhas_base, linhas_atual)
+    alteracoes = []
+
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == 'equal':
+            continue
+        antigas = linhas_base[i1:i2]
+        novas = linhas_atual[j1:j2]
+        pares = list(zip(antigas, novas)) if len(antigas) == len(novas) else []
+
+        if pares:
+            for offset, (linha_antiga, linha_nova) in enumerate(pares):
+                if linha_antiga == linha_nova:
+                    continue
+                m_antiga = _PADRAO_TAG_LINHA.search(linha_antiga)
+                m_nova = _PADRAO_TAG_LINHA.search(linha_nova)
+                numero_linha = j1 + offset + 1
+                if m_antiga and m_nova and m_antiga.group(1) == m_nova.group(1):
+                    alteracoes.append({
+                        'linha': numero_linha,
+                        'campo': m_antiga.group(1),
+                        'antes': m_antiga.group(2),
+                        'depois': m_nova.group(2),
+                    })
+                else:
+                    alteracoes.append({
+                        'linha': numero_linha,
+                        'campo': None,
+                        'antes': linha_antiga.strip(),
+                        'depois': linha_nova.strip(),
+                    })
+        else:
+            # Bloco de tamanho diferente (linhas inseridas/removidas) — não dá
+            # pra parear 1-a-1, mostra como um bloco genérico de alteração.
+            numero_linha = j1 + 1 if novas else i1 + 1
+            alteracoes.append({
+                'linha': numero_linha,
+                'campo': None,
+                'antes': ' / '.join(l.strip() for l in antigas) if antigas else '(nada)',
+                'depois': ' / '.join(l.strip() for l in novas) if novas else '(removido)',
+            })
+
+    return alteracoes
 
 def processar_xml_tiss(arquivo_xml, dfs):
     auditoria = {
@@ -760,11 +877,12 @@ col1, col2 = st.columns([1, 1])
 with col1:
     tem_resultados = 'resultados_lote' in st.session_state and bool(st.session_state.get('resultados_lote'))
     titulo_upload = "📁 Trocar arquivos / Novo lote" if tem_resultados else "📜 Processamento de XMLs em Lote"
+    forcar_aberto = st.session_state.pop('forcar_upload_aberto', False)
 
     # 📦 Recolhido por padrão assim que já existem resultados na tela — libera
     # espaço vertical na coluna, já que o upload deixa de ser a ação principal
     # depois que o lote já foi processado.
-    with st.expander(titulo_upload, expanded=not tem_resultados):
+    with st.expander(titulo_upload, expanded=(not tem_resultados) or forcar_aberto):
         st.markdown("Arraste um ou vários arquivos XML gerados pelo seu sistema aqui.")
         xml_up = st.file_uploader(
             "Arraste os arquivos XML", type=['xml'], label_visibility="collapsed",
@@ -871,182 +989,295 @@ with col2:
 # metade da tela que a coluna oferecia.
 # ==========================================
 if 'resultados_lote' in st.session_state and st.session_state['resultados_lote'] and not resultado.get('falha_total'):
-    st.divider()
-    with st.container(border=True):
-        # ==========================================
-        # EDITOR DE XML — edição direta dentro do Streamlit
-        # ==========================================
-        nome_arquivo = resultado['nome']
-        lote_id = st.session_state.get('lote_id', 0)
-        editor_key = f"editor_texto_{lote_id}_{nome_arquivo}"
-        baseline_key = f"editor_baseline_{lote_id}_{nome_arquivo}"
-        hash_original_key = f"hash_original_{lote_id}_{nome_arquivo}"
-        hash_atual_key = f"hash_atual_{lote_id}_{nome_arquivo}"
-        ja_salvou_key = f"ja_salvou_{lote_id}_{nome_arquivo}"
-        proximo_idx_key = f"proximo_idx_{lote_id}_{nome_arquivo}"
-        erro_validacao_key = f"erro_validacao_{lote_id}_{nome_arquivo}"
+    nome_arquivo = resultado['nome']
+    lote_id = st.session_state.get('lote_id', 0)
+    editor_key = f"editor_texto_{lote_id}_{nome_arquivo}"
+    baseline_key = f"editor_baseline_{lote_id}_{nome_arquivo}"
+    hash_original_key = f"hash_original_{lote_id}_{nome_arquivo}"
+    hash_atual_key = f"hash_atual_{lote_id}_{nome_arquivo}"
+    ja_salvou_key = f"ja_salvou_{lote_id}_{nome_arquivo}"
+    proximo_idx_key = f"proximo_idx_{lote_id}_{nome_arquivo}"
+    erro_validacao_key = f"erro_validacao_{lote_id}_{nome_arquivo}"
+    revisao_key = f"revisao_editor_{lote_id}_{nome_arquivo}"
+    historico_key = f"historico_undo_{lote_id}_{nome_arquivo}"
+    futuro_key = f"historico_redo_{lote_id}_{nome_arquivo}"
+    validacao_manual_key = f"validacao_manual_{lote_id}_{nome_arquivo}"
 
-        # Inicialização (uma única vez, na primeira vez que este arquivo é exibido)
-        if editor_key not in st.session_state:
-            st.session_state[editor_key] = xml_texto
-            st.session_state[baseline_key] = xml_texto
-            st.session_state[hash_original_key] = _extrair_hash_do_texto(xml_texto)
-            st.session_state[hash_atual_key] = st.session_state[hash_original_key]
-            st.session_state[ja_salvou_key] = False
-            st.session_state[proximo_idx_key] = 0
-            st.session_state[erro_validacao_key] = None
+    # Inicialização (uma única vez, na primeira vez que este arquivo é exibido)
+    if editor_key not in st.session_state:
+        st.session_state[editor_key] = xml_texto
+        st.session_state[baseline_key] = xml_texto
+        st.session_state[hash_original_key] = _extrair_hash_do_texto(xml_texto)
+        st.session_state[hash_atual_key] = st.session_state[hash_original_key]
+        st.session_state[ja_salvou_key] = False
+        st.session_state[proximo_idx_key] = 0
+        st.session_state[erro_validacao_key] = None
+        st.session_state[revisao_key] = 0
+        st.session_state[historico_key] = []
+        st.session_state[futuro_key] = []
+        st.session_state[validacao_manual_key] = None
 
-        st.markdown("#### ✏️ Editor de XML")
-        st.caption("Edite o conteúdo diretamente aqui. As alterações só valem para o arquivo final depois de clicar em **Salvar alterações**. Arraste o cantinho inferior direito da caixa para redimensionar.")
+    def _definir_conteudo_editor(novo_texto, empilhar_undo=True):
+        """Atualiza o conteúdo do editor programaticamente (Substituir, Desfazer,
+        Refazer, Recarregar, Salvar). Incrementa 'revisao_key', que faz parte da
+        key do st_ace mais abaixo — isso força o componente a ser remontado com
+        o novo valor. É necessário porque st_ace, sendo um componente de
+        terceiros, não garante refletir mudanças feitas via value= quando a key
+        não muda (o componente preserva seu próprio estado interno entre reruns)."""
+        if empilhar_undo:
+            st.session_state[historico_key].append(st.session_state[editor_key])
+            st.session_state[historico_key] = st.session_state[historico_key][-50:]
+            st.session_state[futuro_key] = []
+        st.session_state[editor_key] = novo_texto
+        st.session_state[revisao_key] += 1
 
-        # Reserva o espaço visual do editor no topo. Ele só é efetivamente
-        # desenhado mais abaixo (depois da lógica de Localizar/Substituir/Salvar),
-        # para que os botões possam atualizar seu conteúdo dentro do mesmo clique.
-        editor_placeholder = st.empty()
+    texto_atual = st.session_state[editor_key]
+    alterado = texto_atual != st.session_state[baseline_key]
 
-        st.markdown("#### 🔎 Localizar e Substituir")
-        col_loc1, col_loc2 = st.columns(2)
-        with col_loc1:
+    # ==========================================
+    # CABEÇALHO
+    # ==========================================
+    nome_exibido = f"{nome_arquivo} *" if alterado else nome_arquivo
+    classe_nome = "file-name modificado" if alterado else "file-name"
+    st.markdown(f"""
+        <div class="tiss-header">
+            <div><span class="app-name">📄 Validador TISS</span><span class="{classe_nome}">{html.escape(nome_exibido)}</span></div>
+        </div>
+    """, unsafe_allow_html=True)
+
+    # ==========================================
+    # BARRA DE FERRAMENTAS
+    # ==========================================
+    tb1, tb2, tb3, tb4, tb5, tb6, tb7, tb_spacer = st.columns([1, 1, 1, 1, 1.4, 1, 1.4, 6])
+
+    with tb1:
+        if st.button("📂", help="Abrir XML (trocar arquivo / novo lote)", use_container_width=True, key=f"tb_abrir_{lote_id}_{nome_arquivo}"):
+            st.session_state['forcar_upload_aberto'] = True
+            st.rerun()
+    with tb2:
+        salvar_clicado_tb = st.button("💾", help="Salvar alterações", use_container_width=True,
+                                       disabled=not alterado, key=f"tb_salvar_{lote_id}_{nome_arquivo}")
+    with tb3:
+        if st.button("↶", help="Desfazer última alteração", use_container_width=True,
+                      disabled=not st.session_state[historico_key], key=f"tb_desfazer_{lote_id}_{nome_arquivo}"):
+            st.session_state[futuro_key].append(st.session_state[editor_key])
+            st.session_state[editor_key] = st.session_state[historico_key].pop()
+            st.session_state[revisao_key] += 1
+            st.rerun()
+    with tb4:
+        if st.button("↷", help="Refazer", use_container_width=True,
+                      disabled=not st.session_state[futuro_key], key=f"tb_refazer_{lote_id}_{nome_arquivo}"):
+            st.session_state[historico_key].append(st.session_state[editor_key])
+            st.session_state[editor_key] = st.session_state[futuro_key].pop()
+            st.session_state[revisao_key] += 1
+            st.rerun()
+    with tb5:
+        with st.popover("🔍 Localizar", help="Localizar e substituir", use_container_width=True):
+            st.markdown("**🔎 Localizar e Substituir**")
             termo_localizar = st.text_input("Localizar", key=f"loc_localizar_{lote_id}_{nome_arquivo}")
-        with col_loc2:
             termo_substituir = st.text_input("Substituir por", key=f"loc_substituir_{lote_id}_{nome_arquivo}")
 
-        col_b1, col_b2, col_b3 = st.columns(3)
-        with col_b1:
-            clicou_localizar = st.button("🔍 Localizar", key=f"btn_localizar_{lote_id}_{nome_arquivo}", use_container_width=True)
-        with col_b2:
-            clicou_proximo = st.button("⏭️ Substituir próximo", key=f"btn_proximo_{lote_id}_{nome_arquivo}", use_container_width=True)
-        with col_b3:
-            clicou_todos = st.button("🔁 Substituir todos", key=f"btn_todos_{lote_id}_{nome_arquivo}", use_container_width=True)
+            cbl1, cbl2, cbl3 = st.columns(3)
+            with cbl1:
+                clicou_localizar = st.button("Localizar", key=f"btn_localizar_{lote_id}_{nome_arquivo}", use_container_width=True)
+            with cbl2:
+                clicou_proximo = st.button("Substituir próximo", key=f"btn_proximo_{lote_id}_{nome_arquivo}", use_container_width=True)
+            with cbl3:
+                clicou_todos = st.button("Substituir todos", key=f"btn_todos_{lote_id}_{nome_arquivo}", use_container_width=True)
 
-        if clicou_localizar:
-            if not termo_localizar:
-                st.warning("Informe o texto a localizar.")
-            else:
-                ocorrencias = st.session_state[editor_key].count(termo_localizar)
-                st.session_state[proximo_idx_key] = 0
-                st.info(f"🔍 **{ocorrencias}** ocorrência(s) encontrada(s) para '{termo_localizar}'.")
-
-        if clicou_proximo:
-            if not termo_localizar:
-                st.warning("Informe o texto a localizar.")
-            else:
-                texto_atual_edicao = st.session_state[editor_key]
-                pos = texto_atual_edicao.find(termo_localizar, st.session_state[proximo_idx_key])
-                if pos == -1:
-                    pos = texto_atual_edicao.find(termo_localizar)  # tenta novamente a partir do início
-                if pos == -1:
-                    st.warning(f"Nenhuma ocorrência de '{termo_localizar}' encontrada.")
+            if clicou_localizar:
+                if not termo_localizar:
+                    st.warning("Informe o texto a localizar.")
                 else:
-                    novo_texto = texto_atual_edicao[:pos] + termo_substituir + texto_atual_edicao[pos + len(termo_localizar):]
-                    st.session_state[editor_key] = novo_texto
-                    st.session_state[proximo_idx_key] = pos + len(termo_substituir)
-                    st.success(f"1 ocorrência substituída (posição {pos}).")
+                    ocorrencias = st.session_state[editor_key].count(termo_localizar)
+                    st.session_state[proximo_idx_key] = 0
+                    st.info(f"🔍 **{ocorrencias}** ocorrência(s) encontrada(s).")
 
-        if clicou_todos:
-            if not termo_localizar:
-                st.warning("Informe o texto a localizar.")
-            else:
-                texto_atual_edicao = st.session_state[editor_key]
-                qtd = texto_atual_edicao.count(termo_localizar)
-                st.session_state[editor_key] = texto_atual_edicao.replace(termo_localizar, termo_substituir)
-                st.session_state[proximo_idx_key] = 0
-                st.success(f"✅ {qtd} ocorrência(s) substituída(s).")
-
-        # Lê o conteúdo mais atual (já refletindo qualquer substituição feita acima)
-        texto_atual = st.session_state[editor_key]
-        alterado = texto_atual != st.session_state[baseline_key]
-
-        # A seção "Salvar Alterações" precisa ter sua lógica executada ANTES de
-        # editor_placeholder.text_area() ser instanciado (mesma razão do
-        # Localizar/Substituir acima) — senão o Streamlit bloqueia a atualização
-        # do editor com "StreamlitWidgetAlreadyInstantiatedError" quando o Salvar
-        # tenta refletir o novo hash no texto do editor. Container reservado aqui
-        # para a seção aparecer, visualmente, DEPOIS do editor e do Localizar/Substituir.
-        save_container = st.container()
-        with save_container:
-            st.divider()
-            st.markdown("#### 💾 Salvar Alterações")
-
-            col_status, col_hash = st.columns(2)
-            with col_status:
-                if alterado:
-                    st.warning("🟡 Alterações não salvas")
-                elif st.session_state[ja_salvou_key]:
-                    st.success("🟢 Alterações salvas")
+            if clicou_proximo:
+                if not termo_localizar:
+                    st.warning("Informe o texto a localizar.")
                 else:
-                    st.info("🟢 Arquivo original (sem alterações)")
+                    texto_edicao = st.session_state[editor_key]
+                    pos = texto_edicao.find(termo_localizar, st.session_state[proximo_idx_key])
+                    if pos == -1:
+                        pos = texto_edicao.find(termo_localizar)
+                    if pos == -1:
+                        st.warning(f"Nenhuma ocorrência de '{termo_localizar}' encontrada.")
+                    else:
+                        novo_texto = texto_edicao[:pos] + termo_substituir + texto_edicao[pos + len(termo_localizar):]
+                        _definir_conteudo_editor(novo_texto)
+                        st.session_state[proximo_idx_key] = pos + len(termo_substituir)
+                        st.success(f"1 ocorrência substituída (posição {pos}).")
+                        st.rerun()
 
-            with col_hash:
-                st.caption(f"**Hash original:** `{st.session_state[hash_original_key] or '—'}`")
-                st.caption(f"**Hash atual:** `{st.session_state[hash_atual_key] or '—'}`")
+            if clicou_todos:
+                if not termo_localizar:
+                    st.warning("Informe o texto a localizar.")
+                else:
+                    texto_edicao = st.session_state[editor_key]
+                    qtd = texto_edicao.count(termo_localizar)
+                    _definir_conteudo_editor(texto_edicao.replace(termo_localizar, termo_substituir))
+                    st.session_state[proximo_idx_key] = 0
+                    st.success(f"✅ {qtd} ocorrência(s) substituída(s).")
+                    st.rerun()
+    with tb6:
+        validar_clicado = st.button("✓", help="Validar XML", use_container_width=True, key=f"tb_validar_{lote_id}_{nome_arquivo}")
+    with tb7:
+        if st.button("⟲ Recarregar", help="Descartar alterações não salvas e voltar ao XML processado automaticamente",
+                      use_container_width=True, disabled=not alterado, key=f"tb_recarregar_{lote_id}_{nome_arquivo}"):
+            _definir_conteudo_editor(xml_texto)
+            st.session_state[erro_validacao_key] = None
+            st.rerun()
 
-            if st.session_state[erro_validacao_key]:
-                st.error(f"❌ {st.session_state[erro_validacao_key]}")
+    if validar_clicado:
+        try:
+            st.session_state[editor_key].encode('ISO-8859-1')
+            ET.fromstring(st.session_state[editor_key].encode('ISO-8859-1'))
+            st.session_state[validacao_manual_key] = ('ok', None)
+        except UnicodeEncodeError as e:
+            st.session_state[validacao_manual_key] = ('erro', f"Caractere fora do ISO-8859-1 na posição {e.start}.")
+        except ET.ParseError as e:
+            st.session_state[validacao_manual_key] = ('erro', str(e))
 
-            clicou_salvar = st.button(
-                "💾 Salvar alterações", type="primary", use_container_width=True,
-                disabled=not alterado, key=f"btn_salvar_{lote_id}_{nome_arquivo}"
-            )
+    if st.session_state[erro_validacao_key]:
+        st.error(f"❌ {st.session_state[erro_validacao_key]}")
 
-        if clicou_salvar:
-            novos_bytes, erro = validar_e_recalcular_xml_editado(texto_atual)
-            if erro:
-                st.session_state[erro_validacao_key] = erro
-                st.rerun()
-            else:
-                st.session_state[erro_validacao_key] = None
-                novo_texto_final = novos_bytes.decode('ISO-8859-1')
-                st.session_state[editor_key] = novo_texto_final
-                st.session_state[baseline_key] = novo_texto_final
-                st.session_state[hash_atual_key] = _extrair_hash_do_texto(novo_texto_final)
-                st.session_state[ja_salvou_key] = True
-                resultado['xml_bytes'] = novos_bytes
-                st.rerun()
+    if salvar_clicado_tb:
+        novos_bytes, erro = validar_e_recalcular_xml_editado(st.session_state[editor_key])
+        if erro:
+            st.session_state[erro_validacao_key] = erro
+            st.rerun()
+        else:
+            st.session_state[erro_validacao_key] = None
+            novo_texto_final = novos_bytes.decode('ISO-8859-1')
+            _definir_conteudo_editor(novo_texto_final, empilhar_undo=False)
+            st.session_state[baseline_key] = novo_texto_final
+            st.session_state[hash_atual_key] = _extrair_hash_do_texto(novo_texto_final)
+            st.session_state[ja_salvou_key] = True
+            st.session_state[validacao_manual_key] = None
+            resultado['xml_bytes'] = novos_bytes
+            st.rerun()
 
-        # Só agora o editor é de fato desenhado (mas aparece visualmente no
-        # topo, no espaço reservado pelo placeholder criado antes do
-        # Localizar/Substituir) — já reflete qualquer alteração feita pelo
-        # Localizar/Substituir ou pelo Salvar, nesta mesma execução.
-        # Altura bem maior (era 480px) e resize liberado via CSS para o usuário
-        # ajustar o tamanho arrastando o cantinho da caixa.
-        editor_placeholder.text_area(
-            "Conteúdo do XML",
-            key=editor_key,
-            height=750,
-            label_visibility="collapsed"
+    # Conteúdo mais atual (já refletindo qualquer ação da barra de ferramentas acima)
+    texto_atual = st.session_state[editor_key]
+    alterado = texto_atual != st.session_state[baseline_key]
+
+    # ==========================================
+    # EDITOR (esquerda) + PAINEL DE ALTERAÇÕES (direita, fixo ao lado)
+    # ==========================================
+    col_editor, col_changes = st.columns([4, 1.1])
+
+    with col_editor:
+        conteudo_editor = st_ace(
+            value=st.session_state[editor_key],
+            language="xml",
+            theme="chrome",
+            keybinding="vscode",
+            show_gutter=True,
+            show_print_margin=False,
+            wrap=False,
+            auto_update=True,
+            font_size=13,
+            tab_size=2,
+            height=700,
+            key=f"ace_{lote_id}_{nome_arquivo}_{st.session_state[revisao_key]}",
         )
+        if conteudo_editor is not None and conteudo_editor != st.session_state[editor_key]:
+            # Edição direta feita pelo usuário dentro do editor (não via botões)
+            st.session_state[historico_key].append(st.session_state[editor_key])
+            st.session_state[historico_key] = st.session_state[historico_key][-50:]
+            st.session_state[futuro_key] = []
+            st.session_state[editor_key] = conteudo_editor
 
-        st.divider()
-        st.markdown("#### 📎 Ações Secundárias")
+    # Recalcula com o valor mais fresco possível (já incluindo o que acabou de ser digitado)
+    texto_atual = st.session_state[editor_key]
+    alterado = texto_atual != st.session_state[baseline_key]
+    alteracoes_diff = calcular_diff_alteracoes(st.session_state[baseline_key], texto_atual) if alterado else []
 
-        xml_bytes_atuais = resultado['xml_bytes']
+    with col_changes:
+        st.markdown("**ALTERAÇÕES**")
+        if alteracoes_diff:
+            st.markdown(f"🟡 {len(alteracoes_diff)} alteração(ões)")
+            st.markdown("---")
+            for alt in alteracoes_diff[:60]:
+                campo_label = alt['campo'] if alt['campo'] else "(trecho alterado)"
+                st.markdown(f"""
+                    <div class="tiss-diff-item">
+                        <div class="linha">Linha {alt['linha']}</div>
+                        <div class="campo">{html.escape(campo_label)}</div>
+                        <div class="valores">{html.escape(alt['antes'])} → {html.escape(alt['depois'])}</div>
+                    </div>
+                """, unsafe_allow_html=True)
+            if len(alteracoes_diff) > 60:
+                st.caption(f"... e mais {len(alteracoes_diff) - 60} alteração(ões).")
+            if st.button("🧹 Limpar histórico", use_container_width=True, key=f"limpar_hist_{lote_id}_{nome_arquivo}"):
+                st.session_state[baseline_key] = texto_atual
+                st.rerun()
+        else:
+            st.caption("Nenhuma alteração realizada.")
 
-        cA, cB = st.columns(2, vertical_alignment="bottom")
-        with cA:
-            st.download_button(
-                label="📥 Baixar XML",
-                data=xml_bytes_atuais,
-                file_name=f"PRONTO_{nome_arquivo}",
-                mime="application/xml",
-                use_container_width=True,
-                key=f"dl_{lote_id}_{nome_arquivo}"
-            )
-        with cB:
-            botao_copiar_codigo(st.session_state[editor_key], key_sufixo=f"copia_{lote_id}_{nome_arquivo}")
+    # ==========================================
+    # BARRA DE STATUS
+    # ==========================================
+    try:
+        ET.fromstring(texto_atual.encode('ISO-8859-1'))
+        status_xml = ('✓ XML válido', 'ok')
+    except UnicodeEncodeError:
+        status_xml = ('✕ Caractere inválido (fora do ISO-8859-1)', 'erro')
+    except ET.ParseError as e:
+        status_xml = ('✕ XML inválido', 'erro')
 
-        with st.expander("📝 Ver Detalhes das Modificações Automáticas"):
-            tem_alteracao = False
-            if isinstance(aud, dict):
-                for chave, lista_logs in aud.items():
-                    if lista_logs:
-                        tem_alteracao = True
-                        st.markdown(f"**{TITULOS_AMIGAVEIS_AUDITORIA.get(chave, chave)}**")
-                        for item in lista_logs:
-                            st.caption(f"• {item}")
-                        st.markdown("---")
-            if not tem_alteracao:
-                st.info("Nenhuma alteração foi necessária neste XML.")
+    if st.session_state[validacao_manual_key]:
+        tipo_v, msg_v = st.session_state[validacao_manual_key]
+        if tipo_v == 'erro':
+            status_xml = (f'✕ XML inválido — {msg_v}', 'erro')
+
+    hash_diferente = st.session_state[hash_atual_key] != st.session_state[hash_original_key]
+    classe_alter = "alterado" if alterado else "ok"
+    texto_alteracoes = f"⚠ {len(alteracoes_diff)} alteração(ões) não salva(s)" if alterado else ("💾 Alterações salvas" if st.session_state[ja_salvou_key] else "Sem alterações")
+
+    st.markdown(f"""
+        <div class="tiss-statusbar">
+            <span>{html.escape(nome_arquivo)}</span>
+            <span>ISO-8859-1</span>
+            <span class="{status_xml[1]}">{html.escape(status_xml[0])}</span>
+            <span>{len(texto_atual.splitlines())} linhas</span>
+            <span class="{classe_alter}">{html.escape(texto_alteracoes)}</span>
+            <span>Hash original: <code>{st.session_state[hash_original_key] or '—'}</code></span>
+            <span class="{'alterado' if hash_diferente else ''}">Hash atual: <code>{st.session_state[hash_atual_key] or '—'}</code></span>
+        </div>
+    """, unsafe_allow_html=True)
+
+    st.divider()
+    st.markdown("#### 📎 Ações Secundárias")
+
+    xml_bytes_atuais = resultado['xml_bytes']
+
+    cA, cB = st.columns(2, vertical_alignment="bottom")
+    with cA:
+        st.download_button(
+            label="📥 Baixar XML",
+            data=xml_bytes_atuais,
+            file_name=f"PRONTO_{nome_arquivo}",
+            mime="application/xml",
+            use_container_width=True,
+            key=f"dl_{lote_id}_{nome_arquivo}"
+        )
+    with cB:
+        botao_copiar_codigo(texto_atual, key_sufixo=f"copia_{lote_id}_{nome_arquivo}")
+
+    with st.expander("📝 Ver Detalhes das Modificações Automáticas"):
+        tem_alteracao = False
+        if isinstance(aud, dict):
+            for chave, lista_logs in aud.items():
+                if lista_logs:
+                    tem_alteracao = True
+                    st.markdown(f"**{TITULOS_AMIGAVEIS_AUDITORIA.get(chave, chave)}**")
+                    for item in lista_logs:
+                        st.caption(f"• {item}")
+                    st.markdown("---")
+        if not tem_alteracao:
+            st.info("Nenhuma alteração foi necessária neste XML.")
 
 
 st.markdown("<br>", unsafe_allow_html=True)

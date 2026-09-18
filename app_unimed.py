@@ -484,7 +484,7 @@ def processar_xml_tiss(arquivo_xml, dfs):
                         detalhes_proc = []
                         
                         grau_val = limpar_numero(regra_p.get('Grau Part Obrigatório', ''))
-                    Sem problemas. Seguiremos pelo caminho estritamente nativo. Utilizaremos os componentes padrão do Streamlit combinados com CSS e um algoritmo embutido no Python para comparar o texto (diff) e simular a interface de um editor profissional, sem precisar instalar nada.   Substitua toda a seção EDITOR DE XML (da linha 484 até a 601 aproximadamente, logo antes da seção Ações Secundárias ou Parametrização) por este novo bloco de código:   Python# ==========================================
+                 # ==========================================
 # EDITOR DE XML — INTERFACE DESKTOP-LIKE
 # ==========================================
 if 'resultados_lote' in st.session_state and st.session_state['resultados_lote'] and not resultado.get('falha_total'):

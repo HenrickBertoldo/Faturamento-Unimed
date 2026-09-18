@@ -25,9 +25,6 @@ st.markdown("""
         font-family: 'Consolas', 'Courier New', monospace !important;
         font-size: 13px !important;
         line-height: 1.4 !important;
-        white-space: pre !important;
-        overflow-wrap: normal !important;
-        overflow-x: scroll !important;
         resize: vertical !important;
     }
     </style>
@@ -484,124 +481,124 @@ def processar_xml_tiss(arquivo_xml, dfs):
                         detalhes_proc = []
                         
                         grau_val = limpar_numero(regra_p.get('Grau Part Obrigatório', ''))
-                 # ==========================================
-# EDITOR DE XML — INTERFACE DESKTOP-LIKE
-# ==========================================
-if 'resultados_lote' in st.session_state and st.session_state['resultados_lote'] and not resultado.get('falha_total'):
-    st.divider()
-    
-    nome_arquivo = resultado['nome']
-    lote_id = st.session_state.get('lote_id', 0)
-    editor_key = f"editor_texto_{lote_id}_{nome_arquivo}"
-    baseline_key = f"editor_baseline_{lote_id}_{nome_arquivo}"
-    hash_original_key = f"hash_original_{lote_id}_{nome_arquivo}"
-    hash_atual_key = f"hash_atual_{lote_id}_{nome_arquivo}"
-    erro_validacao_key = f"erro_validacao_{lote_id}_{nome_arquivo}"
+                        if grau_val:
+                            for eq in equipes_restantes:
+                                target_node = eq if tag_limpa(eq) == 'equipeSadt' else (eq.find('ans:identificacaoEquipe', NS) or eq)
+                                grau_elem = target_node.find('ans:grauPart', NS)
+                                if grau_elem is not None: grau_elem.text = grau_val
+                                else:
+                                    grau_elem = ET.Element(ans_tag('grauPart'))
+                                    grau_elem.text = grau_val
+                                    target_node.insert(0, grau_elem)
+                                
+                                for parent in eq.iter():
+                                    for bad_grau in parent.findall('ans:grauParticipacao', NS): parent.remove(bad_grau)
+                                        
+                            detalhes_proc.append(f"Grau inserido: {grau_val}")
+                            
+                        quantidade_elem = proc_exec.find('ans:quantidadeExecutada', NS)
+                        indent_tail = quantidade_elem.tail if quantidade_elem is not None else None
 
-    # 1. Inicialização de Estado
-    if editor_key not in st.session_state:
-        st.session_state[editor_key] = xml_texto
-        st.session_state[baseline_key] = xml_texto
-        st.session_state[hash_original_key] = _extrair_hash_do_texto(xml_texto)
-        st.session_state[hash_atual_key] = st.session_state[hash_original_key]
-        st.session_state[erro_validacao_key] = None
+                        def _normaliza_via_tecnica(valor):
+                            return str(int(valor)) if valor.isdigit() else valor
 
-    texto_atual = st.session_state[editor_key]
-    alterado = texto_atual != st.session_state[baseline_key]
-    
-    # 2. Cabeçalho (Estilo Janela de Software)
-    marcador_alt = "*" if alterado else ""
-    st.markdown(f"### 💻 Validador TISS &nbsp; | &nbsp; `{nome_arquivo} {marcador_alt}`")
-    
-    with st.container(border=True):
-        # 3. Barra de Ferramentas Superior
-        tb1, tb2, tb3, tb4, tb5, tb6, tb7 = st.columns([1, 1, 1, 1, 2, 2, 1.5], vertical_alignment="bottom")
-        
-        with tb1:
-            if st.button("💾 Salvar", use_container_width=True, disabled=not alterado, help="Salvar alterações"):
-                novos_bytes, erro = validar_e_recalcular_xml_editado(texto_atual)
-                if erro:
-                    st.session_state[erro_validacao_key] = erro
-                    st.rerun()
-                else:
-                    st.session_state[erro_validacao_key] = None
-                    novo_texto_final = novos_bytes.decode('ISO-8859-1')
-                    st.session_state[editor_key] = novo_texto_final
-                    st.session_state[baseline_key] = novo_texto_final
-                    st.session_state[hash_atual_key] = _extrair_hash_do_texto(novo_texto_final)
-                    resultado['xml_bytes'] = novos_bytes
-                    st.rerun()
-        with tb2:
-            st.download_button("📥 Baixar", data=resultado['xml_bytes'], file_name=f"FINAL_{nome_arquivo}", mime="application/xml", use_container_width=True)
-        with tb3:
-            if st.button("↶ Reset", use_container_width=True, help="Desfazer alterações não salvas"):
-                st.session_state[editor_key] = st.session_state[baseline_key]
-                st.session_state[erro_validacao_key] = None
-                st.rerun()
-        with tb4:
-            st.button("✓ Validar", use_container_width=True, disabled=True, help="O XML é validado automaticamente ao salvar")
-            
-        with tb5:
-            loc_text = st.text_input("Localizar", label_visibility="collapsed", placeholder="🔍 Localizar termo...", key=f"loc_{lote_id}")
-        with tb6:
-            sub_text = st.text_input("Substituir", label_visibility="collapsed", placeholder="⇄ Substituir por...", key=f"sub_{lote_id}")
-        with tb7:
-            if st.button("🔁 Substituir", use_container_width=True):
-                if loc_text:
-                    st.session_state[editor_key] = st.session_state[editor_key].replace(loc_text, sub_text)
-                    st.rerun()
+                        via_val = str(regra_p.get('Via de Acesso (1, 2 ou EXCLUIR)', '')).strip().upper()
+                        via_elem = proc_exec.find('ans:viaAcesso', NS)
+                        if via_val == 'EXCLUIR' and via_elem is not None:
+                            proc_exec.remove(via_elem)
+                            via_elem = None
+                            detalhes_proc.append("Via de Acesso excluída")
+                        elif via_val in ['1', '2', '01', '02']:
+                            via_val = _normaliza_via_tecnica(via_val)
+                            if via_elem is not None: via_elem.text = via_val
+                            else:
+                                via_elem = ET.Element(ans_tag('viaAcesso'))
+                                via_elem.text = via_val
+                                via_elem.tail = indent_tail
+                                proc_exec.insert(indice_apos(proc_exec, quantidade_elem), via_elem)
+                            detalhes_proc.append(f"Via de Acesso ajustada: {via_val}")
+                            
+                        tec_val = str(regra_p.get('Técnica (1, 2 ou EXCLUIR)', '')).strip().upper()
+                        tec_elem = proc_exec.find('ans:tecnicaUtilizada', NS)
+                        if tec_val == 'EXCLUIR' and tec_elem is not None:
+                            proc_exec.remove(tec_elem)
+                            detalhes_proc.append("Técnica excluída")
+                        elif tec_val in ['1', '2', '01', '02']:
+                            tec_val = _normaliza_via_tecnica(tec_val)
+                            if tec_elem is not None: tec_elem.text = tec_val
+                            else:
+                                tec_elem = ET.Element(ans_tag('tecnicaUtilizada'))
+                                tec_elem.text = tec_val
+                                tec_elem.tail = indent_tail
+                                ref_apos = via_elem if via_elem is not None else quantidade_elem
+                                proc_exec.insert(indice_apos(proc_exec, ref_apos), tec_elem)
+                            detalhes_proc.append(f"Técnica ajustada: {tec_val}")
+                            
+                        if detalhes_proc: auditoria['procedimentos_ajustados'].append(f"Proc {cod_p}: " + " | ".join(detalhes_proc))
 
-        # 4. Layout Principal Lado a Lado (Editor 75% | Log 25%)
-        st.markdown("<hr style='margin: 0.5rem 0'>", unsafe_allow_html=True)
-        ed_col, log_col = st.columns([3, 1], gap="small")
-        
-        with ed_col:
-            st.text_area(
-                "Editor XML",
-                value=st.session_state[editor_key],
-                key=editor_key,
-                height=650,
-                label_visibility="collapsed"
-            )
-            
-        with log_col:
-            st.markdown("##### 📝 Alterações")
-            if alterado:
-                # Motor de Comparação (Diff) em Python Puro
-                linhas_orig = st.session_state[baseline_key].splitlines()
-                linhas_edit = st.session_state[editor_key].splitlines()
-                mudancas = []
-                max_linhas = max(len(linhas_orig), len(linhas_edit))
-                
-                for i in range(max_linhas):
-                    o_lin = linhas_orig[i].strip() if i < len(linhas_orig) else ""
-                    e_lin = linhas_edit[i].strip() if i < len(linhas_edit) else ""
-                    if o_lin != e_lin:
-                        mudancas.append((i+1, o_lin, e_lin))
-                
-                st.caption(f"🔴 {len(mudancas)} linha(s) modificada(s)")
-                
-                with st.container(height=580): # Painel com rolagem independente
-                    for num_linha, antes, depois in mudancas:
-                        st.markdown(f"**Linha {num_linha}**")
-                        if antes: st.markdown(f"<span style='color: #dc3545; text-decoration: line-through; font-size: 13px;'>{antes[:40]}{'...' if len(antes)>40 else ''}</span>", unsafe_allow_html=True)
-                        if depois: st.markdown(f"<span style='color: #198754; font-size: 13px;'>{depois[:40]}{'...' if len(depois)>40 else ''}</span>", unsafe_allow_html=True)
-                        st.markdown("<hr style='margin: 0.5rem 0'>", unsafe_allow_html=True)
-            else:
-                st.success("✓ Nenhuma alteração.")
-                st.caption("O arquivo no editor está idêntico à versão original salva.")
+                    # AJUSTES DE CBO E CÓDIGO OPERADORA DOS MÉDICOS
+                    for eq in equipes_restantes:
+                        nome_prof_elem = eq.find('.//ans:nomeProf', NS)
+                        nome_prof = nome_prof_elem.text.strip().upper() if nome_prof_elem is not None and nome_prof_elem.text else ""
+                        
+                        if nome_prof in set_conveniados: continue 
+                        
+                        if nome_prof in dict_medicos:
+                            regra_m = dict_medicos[nome_prof]
+                            cbo_novo = limpar_numero(regra_m.get('CBO Correto', ''))
+                            
+                            target_node = eq if tag_limpa(eq) == 'equipeSadt' else (eq.find('ans:identificacaoEquipe', NS) or eq)
 
-        # 5. Barra de Status Inferior (Status Bar)
-        st.markdown("<hr style='margin: 0.5rem 0'>", unsafe_allow_html=True)
-        linhas_totais = len(st.session_state[editor_key].splitlines())
-        status_msg = f"❌ Erro: {st.session_state[erro_validacao_key]}" if st.session_state[erro_validacao_key] else ("⚠ Alterações não salvas" if alterado else "✓ XML Válido")
-        
-        st.markdown(f"""
-        <div style='font-size: 13px; color: #495057; display: flex; justify-content: space-between; padding: 4px 8px; background-color: #e9ecef; border-radius: 4px; font-family: monospace;'>
-            <span>{status_msg} &nbsp;|&nbsp; {linhas_totais} linhas &nbsp;|&nbsp; Codificação: ISO-8859-1</span>
-            <span>Hash: <strong>{st.session_state[hash_atual_key]}</strong></span>
-        </div>
-        """, unsafe_allow_html=True)
+                            # Busca qualquer tag de CBO existente na estrutura
+                            cbos_existentes = [elem for elem in eq.iter() if tag_limpa(elem) in ['CBOS', 'codigoCBOS', 'codigoCBO']]
+
+                            if cbo_novo != '':
+                                if cbos_existentes:
+                                    # Atualiza o CBO original diretamente
+                                    primeiro_cbo = cbos_existentes[0]
+                                    if primeiro_cbo.text != cbo_novo:
+                                        primeiro_cbo.text = cbo_novo
+                                        auditoria['cbos'].append(f"Médico(a) '{nome_prof}': CBO alterado para {cbo_novo}")
+                                    
+                                    # Se houver duplicatas por erro antigo, remove as extras
+                                    for c_extra in cbos_existentes[1:]:
+                                        for parent in eq.iter():
+                                            if c_extra in list(parent): parent.remove(c_extra)
+                                else:
+                                    # Insere o novo CBO dentro do nó correto (identificacaoEquipe / equipeSadt)
+                                    novo_cbo = ET.Element(ans_tag('CBOS'))
+                                    novo_cbo.text = cbo_novo
+                                    target_node.append(novo_cbo)
+                                    auditoria['cbos'].append(f"Médico(a) '{nome_prof}': CBO inserido ({cbo_novo})")
+                            
+                            substituir = str(regra_m.get('Substituir por Cód. Operadora', '')).strip().upper() == 'SIM'
+                            cod_operadora = limpar_numero(regra_m.get('Código na Operadora', ''))
+                            
+                            if substituir and cod_operadora != '':
+                                cod_prof_elem = eq.find('.//ans:codProfissional', NS)
+                                if cod_prof_elem is not None:
+                                    cpf_elem = cod_prof_elem.find('ans:cpfContratado', NS)
+                                    cod_op_elem = cod_prof_elem.find('ans:codigoPrestadorNaOperadora', NS)
+                                    if cpf_elem is not None:
+                                        cpf_elem.tag = ans_tag('codigoPrestadorNaOperadora')
+                                        cpf_elem.text = cod_operadora
+                                        auditoria['cbos'].append(f"Médico(a) '{nome_prof}': CPF -> Cód. Operadora {cod_operadora}")
+                                    elif cod_op_elem is not None:
+                                        cod_op_elem.text = cod_operadora
+                                        auditoria['cbos'].append(f"Médico(a) '{nome_prof}': Cód. Operadora alterado para {cod_operadora}")
+
+                for p in procs_para_remover: procs_container.remove(p)
+
+                # 🆕 NOVA REGRA: escalona horários de procedimentos duplicados (mesmo
+                # código + data + horário) para evitar a crítica "Serviço duplicado".
+                ajustar_horarios_duplicados(procs_container, auditoria)
+
+            # --- OUTRAS DESPESAS ---
+            despesas_container = guia.find('.//ans:outrasDespesas', NS)
+            if despesas_container is not None:
+                for despesa in despesas_container.findall('ans:despesa', NS):
+                    servicos = despesa.find('ans:servicosExecutados', NS)
+                    if servicos is not None:
                         cod_item_elem = servicos.find('.//ans:codigoProcedimento', NS)
                         cod_item = padronizar_codigo_8_digitos(cod_item_elem.text) if cod_item_elem is not None and cod_item_elem.text else ""
                         cod_original_log = cod_item

@@ -483,6 +483,17 @@ def baixar_varios_bytes_direto_no_navegador(arquivos):
         (() => {{
             const arquivos = {json.dumps(itens_js, ensure_ascii=False)};
 
+            if (!window.__tissDownloadCleanupInstalled) {{
+                window.__tissDownloadCleanupInstalled = true;
+                window.addEventListener('pagehide', () => {{
+                    const urls = window.__tissDownloadUrls || [];
+                    for (const url of urls) {{
+                        try {{ URL.revokeObjectURL(url); }} catch (_) {{}}
+                    }}
+                    window.__tissDownloadUrls = [];
+                }}, {{once: false}});
+            }}
+
             for (const arquivo of arquivos) {{
                 const binary = atob(arquivo.data);
                 const bytes = new Uint8Array(binary.length);
@@ -498,7 +509,13 @@ def baixar_varios_bytes_direto_no_navegador(arquivos):
                 a.click();
                 a.remove();
 
-                setTimeout(() => URL.revokeObjectURL(url), 10000);
+                // Não revogar a URL por tempo. Em alguns navegadores, o download
+                // pode continuar usando a Blob URL depois do clique; revogá-la
+                // durante esse período faz o arquivo aparecer na pasta e depois
+                // desaparecer/cancelar. As URLs ficam vivas até a página ser
+                // fechada/recarregada, quando são liberadas de uma vez.
+                window.__tissDownloadUrls = window.__tissDownloadUrls || [];
+                window.__tissDownloadUrls.push(url);
             }}
         }})();
     '''

@@ -24,6 +24,7 @@
 import os
 import re
 import io
+import base64
 import json
 import html
 import hashlib
@@ -443,6 +444,66 @@ def recalcular_hash_e_serializar(tree, root):
     xml_bytes = xml_bytes.replace(b"<?xml version='1.0' encoding='ISO-8859-1'?>", b'<?xml version="1.0" encoding="ISO-8859-1"?>')
     xml_bytes = xml_bytes.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
     return xml_bytes
+
+def baixar_bytes_direto_no_navegador(conteudo, nome_arquivo, media_type='application/octet-stream'):
+    """Dispara um download diretamente no navegador usando Blob."""
+    baixar_varios_bytes_direto_no_navegador([(conteudo, nome_arquivo, media_type)])
+
+
+def baixar_varios_bytes_direto_no_navegador(arquivos):
+    """Dispara vários downloads a partir de um único clique do usuário.
+
+    Importante para a fragmentação 220163: o botão de download do arquivo
+    principal precisa continuar entregando o XML principal + o fragmento, mas
+    sem usar ui.download.content(), que dependia de uma rota temporária no
+    servidor. Todos os cliques dos <a> são feitos sincronamente dentro do mesmo
+    gesto do usuário.
+    """
+    if not arquivos:
+        return
+
+    itens_js = []
+    for item in arquivos:
+        if len(item) == 2:
+            conteudo, nome_arquivo = item
+            media_type = 'application/octet-stream'
+        else:
+            conteudo, nome_arquivo, media_type = item
+
+        if not isinstance(conteudo, (bytes, bytearray)):
+            raise TypeError('O conteúdo do download precisa ser bytes.')
+
+        itens_js.append({
+            'data': base64.b64encode(bytes(conteudo)).decode('ascii'),
+            'name': str(nome_arquivo),
+            'type': str(media_type),
+        })
+
+    js = f'''
+        (() => {{
+            const arquivos = {json.dumps(itens_js, ensure_ascii=False)};
+
+            for (const arquivo of arquivos) {{
+                const binary = atob(arquivo.data);
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+                const blob = new Blob([bytes], {{type: arquivo.type}});
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = arquivo.name;
+                a.style.display = 'none';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+
+                setTimeout(() => URL.revokeObjectURL(url), 10000);
+            }}
+        }})();
+    '''
+    ui.run_javascript(js)
+
 
 def _extrair_hash_do_texto(texto):
     """Extrai o valor atualmente escrito dentro de <ans:hash>...</ans:hash> a
@@ -1561,7 +1622,11 @@ def painel_resultados(estado, editores):
                 with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
                     for r in sucesso:
                         zf.writestr(f"PRONTO_{r['nome']}", r['xml_bytes'])
-                ui.download.content(buffer.getvalue(), 'XMLS_CORRIGIDOS.zip', media_type='application/zip')
+                baixar_bytes_direto_no_navegador(
+                    buffer.getvalue(),
+                    'XMLS_CORRIGIDOS.zip',
+                    media_type='application/zip',
+                )
             ui.button('📦 Baixar Todos os XMLs Corrigidos (.ZIP)', on_click=baixar_zip, color='primary').classes('w-full')
             seletor_arquivo = ui.select(nomes, value=valor_inicial, label='Arquivo selecionado').classes('w-full mt-2')
         else:
@@ -1935,27 +2000,55 @@ def construir_editor_xml(estado, editores, resultado):
         ed['hash_atual'] = _extrair_hash_do_texto(novo_texto_final)
         ed['salvo_alguma_vez'] = True
         resultado['xml_bytes'] = novos_bytes
-        # O Python roda no servidor, não na máquina de quem está usando o
-        # app — quem efetivamente coloca o arquivo no computador é sempre o
-        # download do navegador, disparado aqui.
-        ui.download.content(novos_bytes, f"PRONTO_{nome_arquivo}", media_type='application/xml')
+        # O arquivo é entregue diretamente ao navegador usando Blob.
+        # Não usamos ui.download.content aqui porque ele cria uma rota HTTP de
+        # uso único no servidor, que é removida após o download ser consumido.
+        # Para este editor, o Blob é mais seguro: os bytes ficam no navegador
+        # durante o disparo e não dependem de uma rota temporária.
+        arquivos_para_baixar = [
+            (
+                novos_bytes,
+                f"PRONTO_{nome_arquivo}",
+                'application/xml;charset=ISO-8859-1',
+            )
+        ]
 
-        # 🆕 Se este arquivo fez parte de uma fragmentação (é o principal ou
-        # é um dos fragmentos gerados a partir dele), baixa também os outros
-        # arquivos do mesmo grupo — assim um clique só no botão de download
-        # já traz tudo, sem precisar recorrer ao ZIP "Baixar Todos".
-        nomes_relacionados = [n for n in (resultado.get('arquivos_relacionados') or []) if n != nome_arquivo]
+        # 🆕 Preserva a regra da fragmentação 220163: quando o arquivo
+        # selecionado pertence a um grupo de fragmentação, o clique no botão
+        # continua baixando o principal + o(s) fragmento(s). A diferença é que
+        # agora todos usam Blob no navegador, sem ui.download.content().
+        nomes_relacionados = [
+            n for n in (resultado.get('arquivos_relacionados') or [])
+            if n != nome_arquivo
+        ]
         baixados_junto = []
+        nomes_ja_baixados = {nome_arquivo}
+
         for nome_rel in nomes_relacionados:
-            r_rel = next((r for r in estado['resultados_lote'] if r['nome'] == nome_rel and not r.get('falha_total')), None)
-            if r_rel and r_rel.get('xml_bytes'):
-                ui.download.content(r_rel['xml_bytes'], f"PRONTO_{r_rel['nome']}", media_type='application/xml')
+            r_rel = next(
+                (r for r in estado['resultados_lote']
+                 if r['nome'] == nome_rel and not r.get('falha_total')),
+                None,
+            )
+            if r_rel and r_rel.get('xml_bytes') and nome_rel not in nomes_ja_baixados:
+                arquivos_para_baixar.append((
+                    r_rel['xml_bytes'],
+                    f"PRONTO_{r_rel['nome']}",
+                    'application/xml;charset=ISO-8859-1',
+                ))
+                nomes_ja_baixados.add(nome_rel)
                 baixados_junto.append(r_rel['nome'])
+
+        # Um único clique continua podendo gerar dois arquivos quando a regra
+        # 220163 exigir isso. Os dois downloads são iniciados dentro do mesmo
+        # gesto do usuário, sem criar múltiplas rotas temporárias no servidor.
+        baixar_varios_bytes_direto_no_navegador(arquivos_para_baixar)
 
         if baixados_junto:
             ui.notify(
-                f"✅ Hash recalculado. Este arquivo foi fragmentado — baixado junto com: {', '.join(baixados_junto)}.",
-                type='positive', multi_line=True,
+                f"✅ Hash recalculado. Download iniciado com o arquivo principal e o fragmento: {', '.join(baixados_junto)}.",
+                type='positive',
+                multi_line=True,
             )
         else:
             ui.notify('✅ Hash recalculado e download iniciado.', type='positive')

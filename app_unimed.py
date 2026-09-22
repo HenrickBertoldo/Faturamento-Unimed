@@ -1788,52 +1788,143 @@ def construir_editor_xml(estado, editores, resultado):
     _debounce = {'timer': None, 'em_rajada': False}
 
     def _fim_da_rajada(alterado):
-        # Marca o fim da pausa de digitação: a próxima tecla começa uma nova
-        # rajada (e portanto um novo checkpoint de desfazer).
+        # Marca o fim da pausa de digitação: a próxima alteração começa uma
+        # nova rajada (e portanto um novo checkpoint de desfazer).
         _debounce['em_rajada'] = False
         atualizar_painel_diff(alterado)
 
-    def ao_digitar(e):
-        # Mudança de valor disparada pelo próprio código (desfazer, refazer,
-        # salvar, recarregar, substituir) — não é digitação do usuário e não
-        # deve mexer no histórico de desfazer nem reagendar o diff.
+    def registrar_texto_digitado(novo_texto):
+        """Atualiza o estado Python com o texto REAL do CodeMirror.
+
+        Não usamos editor.on_value_change aqui de propósito. O componente
+        CodeMirror do NiceGUI envia mudanças incrementais (ChangeSet) para o
+        servidor; qualquer diferença de representação de quebras de linha
+        entre navegador e servidor pode aplicar a edição numa posição errada.
+        Em vez disso, recebemos do navegador o documento completo.
+        """
+        if not isinstance(novo_texto, str):
+            return
+
+        # O CodeMirror trabalha com \n. Mantemos a mesma representação em todo
+        # o estado Python para que posições e diffs nunca dependam de CRLF.
+        novo_texto = novo_texto.replace('\\r\\n', '\\n').replace('\\r', '\\n')
+
         if _evento_editor['ignorar_proximo']:
-            _evento_editor['ignorar_proximo'] = False
+            return
+
+        if novo_texto == ed['texto_atual']:
             return
 
         if not _debounce['em_rajada']:
-            # Início de uma nova rajada de digitação: guarda o texto de
-            # ANTES dela como ponto de desfazer. Sem isso, digitar
-            # diretamente no editor nunca alimentava o histórico — só ações
-            # como "Substituir" ou "Recarregar" passavam por
-            # definir_conteudo(), então os botões Desfazer/Refazer ficavam
-            # sempre desabilitados (ou sem efeito) depois de uma edição
-            # comum de texto.
+            # Guarda o estado imediatamente anterior à rajada de digitação para
+            # que um único Desfazer reverta a edição inteira da pausa.
             ed['historico'].append(ed['texto_atual'])
             ed['historico'][:] = ed['historico'][-50:]
             ed['futuro'].clear()
             _debounce['em_rajada'] = True
 
-        ed['texto_atual'] = e.value
-        # Atualização leve (label, botões, validade, status) a cada tecla —
-        # é barata. O recálculo do diff (caro) é adiado: se o usuário digitar
-        # de novo antes de 0.5s passar, o cálculo pendente é cancelado e
-        # reagendado, então só roda de fato quando a digitação faz uma pausa.
-        # É também essa mesma pausa que fecha a rajada atual do undo.
+        ed['texto_atual'] = novo_texto
         alterado = ed['texto_atual'] != ed['texto_base']
         atualizar_interface(recalcular_diff=False)
+
         if _debounce['timer']:
             _debounce['timer'].deactivate()
-        _debounce['timer'] = ui.timer(0.5, lambda: _fim_da_rajada(alterado), once=True)
-    editor.on_value_change(ao_digitar)
+        _debounce['timer'] = ui.timer(
+            0.5,
+            lambda: _fim_da_rajada(alterado),
+            once=True,
+        )
 
-    def baixar(_=None):
-        # Antes existiam dois botões (Salvar e Baixar) fazendo praticamente
-        # a mesma coisa. Agora "Baixar" sozinho: valida o texto atual do
-        # editor, recalcula o hash oficial da ANS e já dispara o download —
-        # funciona tanto para um arquivo sem edição manual (baixa o já
-        # corrigido automaticamente) quanto para um que foi editado à mão.
-        novos_bytes, erro = validar_e_recalcular_xml_editado(ed['texto_atual'])
+    async def obter_texto_real_do_editor():
+        """Lê diretamente o documento atual do CodeMirror no navegador.
+
+        Isso funciona como uma segunda camada de segurança: mesmo que o evento
+        de sincronização ainda não tenha chegado ao servidor, Copiar/Validar/
+        Baixar usam exatamente o que está visível no editor.
+        """
+        try:
+            valor = await ui.run_javascript(f'''
+                (() => {{
+                    const element = getElement({editor.id});
+                    const view = element && element.editor;
+                    return view ? view.state.doc.toString() : null;
+                }})()
+            ''')
+        except Exception:
+            return ed['texto_atual']
+
+        if isinstance(valor, str):
+            return valor.replace('\\r\\n', '\\n').replace('\\r', '\\n')
+        return ed['texto_atual']
+
+    async def sincronizar_editor_agora():
+        """Força uma leitura do documento atual do navegador antes de uma ação."""
+        texto_real = await obter_texto_real_do_editor()
+        registrar_texto_digitado(texto_real)
+        return texto_real
+
+    # O evento incremental nativo on_value_change NÃO é usado.
+    # Em seu lugar, um pequeno sincronizador no navegador lê o documento
+    # completo do CodeMirror e emite somente quando o conteúdo realmente muda.
+    # Assim, não existe mais aplicação de posição/offset no texto Python.
+    _evento_texto_completo = f'tiss_editor_full_text_{editor.id}'
+
+    def _receber_texto_completo(e):
+        valor = e.args
+        if isinstance(valor, dict):
+            valor = valor.get('value', valor.get('text'))
+        registrar_texto_digitado(valor)
+
+    editor.on(_evento_texto_completo, _receber_texto_completo)
+
+    ui.run_javascript(f'''
+        (() => {{
+            const tentarInstalar = () => {{
+                const element = getElement({editor.id});
+                const view = element && element.editor;
+
+                if (!element || !view) {{
+                    setTimeout(tentarInstalar, 50);
+                    return;
+                }}
+
+                if (element.__tissFullTextSyncTimer) {{
+                    return;
+                }}
+
+                let ultimoTexto = view.state.doc.toString();
+
+                element.__tissFullTextSyncTimer = setInterval(() => {{
+                    if (!view.dom || !view.dom.isConnected) {{
+                        clearInterval(element.__tissFullTextSyncTimer);
+                        delete element.__tissFullTextSyncTimer;
+                        return;
+                    }}
+
+                    const atual = view.state.doc.toString();
+
+                    if (atual === ultimoTexto) {{
+                        return;
+                    }}
+
+                    ultimoTexto = atual;
+                    element.$emit({_evento_texto_completo!r}, atual);
+                }}, 250);
+            }};
+
+            tentarInstalar();
+        }})();
+    ''')
+
+    async def baixar(_=None):
+        # Leia o documento diretamente do navegador antes de validar. Isso evita
+        # que uma eventual diferença entre o estado Python e o texto visual do
+        # CodeMirror chegue ao arquivo baixado.
+        texto_real = await sincronizar_editor_agora()
+
+        # "Baixar" sozinho: valida o texto atual do editor, recalcula o hash
+        # oficial da ANS e já dispara o download.
+        novos_bytes, erro = validar_e_recalcular_xml_editado(texto_real)
         if erro:
             ed['erro_validacao'] = erro
             ui.notify(f'❌ {erro}', type='negative', multi_line=True, close_button=True)
@@ -1870,7 +1961,8 @@ def construir_editor_xml(estado, editores, resultado):
             ui.notify('✅ Hash recalculado e download iniciado.', type='positive')
     botao_baixar.on('click', baixar)
 
-    def desfazer(_=None):
+    async def desfazer(_=None):
+        await sincronizar_editor_agora()
         if ed['historico']:
             ed['futuro'].append(ed['texto_atual'])
             anterior = ed['historico'].pop()
@@ -1879,7 +1971,8 @@ def construir_editor_xml(estado, editores, resultado):
             atualizar_interface()
     botao_desfazer.on('click', desfazer)
 
-    def refazer(_=None):
+    async def refazer(_=None):
+        await sincronizar_editor_agora()
         if ed['futuro']:
             ed['historico'].append(ed['texto_atual'])
             proximo = ed['futuro'].pop()
@@ -1913,26 +2006,25 @@ def construir_editor_xml(estado, editores, resultado):
         dialogo_recarregar.open()
     botao_recarregar.on('click', recarregar)
 
-    def validar(_=None):
+    async def validar(_=None):
+        texto_real = await sincronizar_editor_agora()
         try:
-            ed['texto_atual'].encode('ISO-8859-1')
-            ET.fromstring(ed['texto_atual'].encode('ISO-8859-1'))
+            texto_real.encode('ISO-8859-1')
+            ET.fromstring(texto_real.encode('ISO-8859-1'))
             ui.notify('✓ XML válido', type='positive')
         except Exception as e:
             ui.notify(f'✕ XML inválido: {e}', type='negative')
     botao_validar.on('click', validar)
 
-    def copiar(_=None):
-        # json.dumps() (não repr()) porque o texto vai virar um literal de
-        # string em JAVASCRIPT, não em Python — as regras de escape das duas
-        # linguagens são parecidas mas não idênticas (ex.: os separadores de
-        # linha Unicode U+2028/U+2029 quebram uma string JS sem escape, mas
-        # o repr() do Python não os escapa). JSON é escape válido nas duas.
-        ui.run_javascript(f"navigator.clipboard.writeText({json.dumps(ed['texto_atual'])})")
+    async def copiar(_=None):
+        # Sempre copia o texto que está realmente no CodeMirror no navegador.
+        texto_real = await sincronizar_editor_agora()
+        ui.run_javascript(f"navigator.clipboard.writeText({json.dumps(texto_real)})")
         ui.notify('Código copiado para a área de transferência.', type='positive')
     botao_copiar.on('click', copiar)
 
-    def localizar(_=None):
+    async def localizar(_=None):
+        await sincronizar_editor_agora()
         termo = campo_localizar.value
         if not termo:
             resultado_busca.text = 'Informe o texto a localizar.'
@@ -1941,7 +2033,8 @@ def construir_editor_xml(estado, editores, resultado):
         resultado_busca.text = f'{qtd} ocorrência(s) encontrada(s).'
     botao_loc.on('click', localizar)
 
-    def substituir_um(_=None):
+    async def substituir_um(_=None):
+        await sincronizar_editor_agora()
         termo, novo = campo_localizar.value, campo_substituir.value
         if not termo:
             resultado_busca.text = 'Informe o texto a localizar.'
@@ -1955,7 +2048,8 @@ def construir_editor_xml(estado, editores, resultado):
         resultado_busca.text = '1 ocorrência substituída.'
     botao_sub_um.on('click', substituir_um)
 
-    def substituir_todos(_=None):
+    async def substituir_todos(_=None):
+        await sincronizar_editor_agora()
         termo, novo = campo_localizar.value, campo_substituir.value
         if not termo:
             resultado_busca.text = 'Informe o texto a localizar.'

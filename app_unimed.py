@@ -351,7 +351,7 @@ def corrigir_valores_negativos(root, auditoria):
 def corrigir_motivo_encerramento(root, auditoria):
     logs = []
     for elem in root.iter():
-       tag_nome = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+        tag_nome = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
         if tag_nome == 'motivoEncerramento' and elem.text:
             if elem.text.strip() in ('11', '15'):
                 valor_anterior = elem.text.strip()
